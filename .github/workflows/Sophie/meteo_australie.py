@@ -4,7 +4,7 @@ Created on Wed Jul 12 21:13:22 2023
 
 @author: Sophie
 """
-
+# ajout d'un commentaire pour git
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
