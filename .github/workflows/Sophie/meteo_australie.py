@@ -51,7 +51,10 @@ class ProjetAustralie:
         print (self.df.isna().sum()/self.df.shape[0])
         # Evaporation, Sunshine, Cloud9am, Cloud3pm contiennent beaucoup de NA (39% pour Cloud9am jusqu'à 48% pour Sunshine)
         # => drop? regarder corrélation de cette variable avec les temperatures et la pluie lorsqu'elle est disponible
-              
+
+        plt.figure(figsize=(12,6))
+        plt.bar(self.df.columns, self.df.isna().sum() )
+        plt.xticks(rotation=90);
         
         # verification des correlations entre les variables numeriques
         # => correlation intéressante entre RainTomorrow et RainToday, Cloud3pm (dommage...), Cloud9am (idem...), 
@@ -115,6 +118,18 @@ class ProjetAustralie:
         #plt.legend()
         plt.show();
     
+    
+    # in progress #
+    def indexation_temporelle_complete(self):
+        date_min = self.df.Date.min()
+        date_max = self.df.Date.max()
+        print ("Plage de date: du ", date_min, "au ", date_max)
+        print (date_max-date_min, "jours")
+        
+        date_range = pd.date_range(start=self.df.Date.min(), end=self.df.Date.max(), freq='D')     
+        
+        
+    # analyse temporelle - à approfondir
     def analyses_temporelles(self):
         self.df["DayOfYear"] = self.df.Date.dt.dayofyear
         self.df["Week"] = self.df.Date.dt.isocalendar().week
@@ -142,41 +157,46 @@ class ProjetAustralie:
 
         plt.show();
     
+    # -----------------------------
     # calcule la correlation avec chaque variable qualitative du vent
     def correlation_vent(self):
         self.df_chi2=pd.DataFrame()
         var_vent=["WindGustDir", "WindDir9am", "WindDir3pm"]
         for e in var_vent:
-            self.correlation_var(e)
+            self._correlation_var(e)
         print("\np-value issu du Chi2 entre les variables du vent et RainTomorrow:\n",self.df_chi2)
     
+        print ("\n Villes ayant au moins une p-value >.05\n", self.df_chi2[self.df_chi2.max(axis=1)>.05])
+    
     # calcule le chi2 pour une variable qualitative
-    def correlation_var(self, var):
+    def _correlation_var(self, var):
         self.df_chi2[var]=""
 
         # calcule la correlation du vent, toutes villes confondues        
         dfl=self.df
-        self.df_chi2.loc["_Tout",var] = self.correlation_vars(dfl, "RainTomorrow", var) 
+        self.df_chi2.loc["*Tout",var] = self._correlation_vars(dfl, "RainTomorrow", var) 
         
         # calcule les correlations du vent, par ville
         for e in self.df.Location.unique():
             dfl = self.df.loc[self.df.Location==e]
             #print (e, var)
-            self.df_chi2.loc[e,var]=self.correlation_vars(dfl, "RainTomorrow", var) 
+            self.df_chi2.loc[e,var]=self._correlation_vars(dfl, "RainTomorrow", var) 
             
         self.df_chi2 = self.df_chi2.sort_values(var, ascending=False)
         #self.chi2=df_chi2
         
     # calcule le chi2 entre deux variables
     # renvoie -1 si aucune occurence n'existe pour le couple
-    def correlation_vars(self, df, var1, var2):
+    def _correlation_vars(self, df, var1, var2):
             tcd = pd.crosstab(df[var1], df[var2])
             if (len(tcd)>0):
                 res_chi2 =chi2_contingency(tcd)
                 return res_chi2[1]
             return -1
         
+    # -----------------------------
     
+    # in progress: j'aimerais tenter d'arriver à clusteriser automatiquement les villes
     def clusterisation(self):
         # tentative de determination de climats similaires dans certaines villes
         from sklearn.cluster import KMeans
@@ -190,6 +210,8 @@ class ProjetAustralie:
         df_cluster['ClusterLocation'] = kmeans.labels_
         print(df_cluster[['Location', 'ClusterLocation']])
     
+    # -----------------------------
+    # représentation geographique sur une carte    
     def synthetise_villes(self):
         #s_rt = self.df.groupby("Location")["RainTomorrow"].mean()
         df_rt = self.df.groupby("Location").agg({"RainTomorrow":'mean', "MaxTemp":'mean', "Pressure9am":'mean', 'Location':'count'})
@@ -204,6 +226,7 @@ class ProjetAustralie:
         fig.show(renderer='browser')
               
     
+    # chargement des données geographiques
     def carte_australie(self):
         
         # Créer un DataFrame avec les coordonnées de la ville de Paris
@@ -219,6 +242,6 @@ class ProjetAustralie:
 pa = ProjetAustralie()
 
 pa.analyse_donnees()
-pa.preprocessing_apres_analyse()
-#pa.carte_australie()
-#pa.synthetise_villes()
+#pa.preprocessing_apres_analyse()
+pa.carte_australie()
+pa.synthetise_villes()
