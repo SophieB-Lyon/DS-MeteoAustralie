@@ -27,6 +27,7 @@ class ProjetAustralie:
         # remplace Yes/No par 0/1
         self.df = self.df.replace({"No":0, "Yes":1})
         self.df.Date = pd.to_datetime(self.df.Date)
+        self.df = self.df.set_index("Date", drop=False)
     
     def preprocessing_apres_analyse(self):
         # ajout de AmplitudeTemp
@@ -109,28 +110,117 @@ class ProjetAustralie:
         axes.set_title("Nb d'enregistrements nuls par Location", fontsize=18)
         plt.show();
         
-        # trous dans le temps
-        plt.figure(figsize=(48,12))
-        #plt.xticks(pd.date_range(start='2007-01-01', end='2018-12-31', freq='M'), rotation=90)
-        self.df.groupby([pd.Grouper(key='Date', freq='w'), 'Location']).size().unstack().plot(kind='line', figsize=(24, 16))
-        #df_tmp = self.df.groupby([pd.Grouper(key='Date', freq='M'), 'Location']).size().unstack()
-        #plt.plot(df_tmp)
-        #plt.legend()
-        plt.show();
-    
-    
-    # in progress #
-    def indexation_temporelle_complete(self):
-        date_min = self.df.Date.min()
-        date_max = self.df.Date.max()
-        print ("Plage de date: du ", date_min, "au ", date_max)
-        print (date_max-date_min, "jours")
+    # --------------------------------------------
+    # affiche les graphes representant les NA et les moyennes en fonction du temps
+    def analyse_variable_temps(self, variable, frequence):
         
-        date_range = pd.date_range(start=self.df.Date.min(), end=self.df.Date.max(), freq='D')     
+        # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
+        if ~hasattr(self, "df_resample"):
+            self.reindexation_temporelle()
+            
+        df = self.df_resample[['Location', variable]]       
+        df["NbNA"] = df[variable].isna()
+        gdf = df.groupby([pd.Grouper(freq=frequence), "Location"]).agg({variable:'mean', 'NbNA':'sum'}).reset_index()
+        gdf = gdf.rename(columns = {"level_0":"Temps"})        
+        
+        self.gdf = gdf
+        
+        # NA
+        fig, axes = plt.subplots(2,2,figsize=(36,18))
+
+        sns.lineplot(data=gdf, x="Temps", y="NbNA", ax=axes[0,0])
+        axes[0,0].set_title("Nombre de NA de "+variable+" (toutes localités confondues)", fontsize=18)
+        axes[0,0].set_xlabel("Temps (frequence: "+frequence+")")
+        sns.lineplot(data=gdf, x="Temps", y="NbNA", hue='Location', ax=axes[0,1], legend=None)
+        axes[0,1].set_title("Nombre de NA "+variable+" (par localité)", fontsize=18)
+        axes[0,1].set_xlabel("Temps (frequence: "+frequence+")")
+       
+        # Moyenne des valeurs
+        sns.lineplot(data=gdf, x="Temps", y=variable, ax=axes[1,0])
+        axes[1,0].set_title("Moyenne de "+variable+" (toutes localités confondues)", fontsize=18)
+        axes[1,0].set_xlabel("Temps (frequence: "+frequence+")")
+        sns.lineplot(data=gdf, x="Temps", y=variable, hue='Location', ax=axes[1,1], legend=None)
+        axes[1,1].set_title("Moyenne de "+variable+" (par localité)", fontsize=18)
+        axes[1,1].set_xlabel("Temps (frequence: "+frequence+")")
+
+        fig.show()
+        
+        # Tracer la courbe avec Plotly
+        fig = px.line(gdf, x="Temps", y="NbNA", color='Location')
+        
+        # Ajouter les titres et les labels
+        fig.update_layout(
+            title="Nombre de NA de "+variable+" (toutes localités confondues)",
+            xaxis_title="Temps (frequence: "+frequence+")",
+            yaxis_title="NbNA"
+        )        
+        # Afficher le graphique
+        fig.show(renderer='browser')
+
+        
+    
+    # reindexe les dates pour qu'il n'y ait aucun trou
+    def reindexation_temporelle(self):
+        date_min = self.df.index.min()
+        date_max = self.df.index.max()
+        print ("Plage de date: du ", date_min, "au ", date_max)
+        print (date_max-date_min)
+        
+        # cree un range de la date min à la max
+        # Un 'resample' ne suffit pas car les dates min et max doivent etre communes à chaque Location
+        date_range = pd.date_range(start=date_min, end=date_max, freq='D')     
+        date_range =pd.DataFrame(index=date_range)
+        
+        df_dates = pd.DataFrame()
+        
+        for location in self.df.Location.unique():
+            df_l = self._reindexation_temporelle_location(location, date_range)
+            df_dates = pd.concat([df_dates, df_l], axis=0)
+            
+        df_dates['NbTotNA'] = df_dates.iloc[:,1:].isna().sum(axis=1)
+        self.df_resample = df_dates
+        
+    # renvoie un df de la location reechantilloné sur une plage de date passée en argument
+    def _reindexation_temporelle_location(self, location, date_range):
+        df_l = self.df[self.df.Location==location]
+        df_l_c = pd.concat([date_range, df_l], axis=1)
+        df_l_c.Location = location # nécessaire car les nouvelles dates entrainent une location nulle
+        return df_l_c
+        
+    # comparaison des NA à partir du DF d'origine et celui resamplé
+    def comparaison_avec_sans_dates_reindexees(self, location, variable, frequence):
+        # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
+        if ~hasattr(self, "df_resample"):
+            self.reindexation_temporelle()
+
+        fig, axes = plt.subplots(2,1,figsize=(24,12))
+        # sans reindexation
+        self._comparaison_avec_sans_dates_reindexees(self.df[['Location', variable]], location, variable, frequence, axes[0])
+        axes[0].set_title("Nombre de NA de "+variable+" à "+location+" \n(sans resample sur les dates)", fontsize=18)
+        axes[0].set_xlabel("")
+
+        # avec reindexation
+        self._comparaison_avec_sans_dates_reindexees(self.df_resample[['Location', variable]], location, variable, frequence, axes[1])
+        axes[1].set_title("Nombre de NA de "+variable+" à "+location+" \n(avec resample sur les dates)", fontsize=18)
+        axes[1].set_xlabel("Temps (frequence: "+frequence+")")
+        fig.show()
+        
+    def _comparaison_avec_sans_dates_reindexees(self, df, location, variable, frequence, axe):
+
+        df=df[df.Location==location]
+        
+        df["NbNA"] = df[variable].isna()
+        gdf = df.groupby([pd.Grouper(freq=frequence), "Location"]).agg({variable:'mean', 'NbNA':'sum'}).reset_index()
+        gdf = gdf.rename(columns = {"level_0":"Temps", "Date":"Temps"})        
+        self.ggdf=gdf
+        # NA
+        sns.lineplot(data=gdf, x="Temps", y="NbNA", ax=axe)
+        #axe.set_xlabel("Temps (frequence: "+frequence+")")
+
         
         
     # analyse temporelle - à approfondir
-    def analyses_temporelles(self):
+    def analyses_temporelles(self):       
         self.df["DayOfYear"] = self.df.Date.dt.dayofyear
         self.df["Week"] = self.df.Date.dt.isocalendar().week
         self.df["Year"] = self.df.Date.dt.year
@@ -243,5 +333,5 @@ pa = ProjetAustralie()
 
 pa.analyse_donnees()
 #pa.preprocessing_apres_analyse()
-pa.carte_australie()
-pa.synthetise_villes()
+#pa.carte_australie()
+#pa.synthetise_villes()
