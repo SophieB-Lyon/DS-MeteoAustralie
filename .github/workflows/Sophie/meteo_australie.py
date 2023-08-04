@@ -11,12 +11,16 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import plotly.express as px
 from scipy.stats import chi2_contingency
+from sklearn.model_selection import train_test_split
+from sklearn import preprocessing
+from sklearn.preprocessing import MinMaxScaler
 
 class ProjetAustralie:
     
     def __init__(self):
         self.charge_donnees()
         self.preprocessing()
+        self.is_preprocessing_apres_analyse=False
         
     def charge_donnees(self):
         self.df = pd.read_csv("weatherAUS.csv")
@@ -30,12 +34,49 @@ class ProjetAustralie:
         self.df = self.df.set_index("Date", drop=False)
     
     def preprocessing_apres_analyse(self):
+        # si deja fait, on sort
+        if self.is_preprocessing_apres_analyse:
+            return
+        
         # ajout de AmplitudeTemp
         self.df["AmplitudeTemp"]=self.df.MaxTemp - self.df.MinTemp
         
         # suppression des variable très fortement correlées
         self.df = self.df.drop(columns=["MinTemp", "Temp9am", "Temp3pm", "Pressure3pm"])
         
+        # supprime la date (dispo en index)
+        self.df = self.df.drop(columns="Date")
+
+        # ajoute les proprietes des villes
+        self._ajoute_prop_locations()
+        
+        # supprime le nom de la ville, puisqu'on a ses coordonnées => pas de dummies sur le nom de la ville
+        self.df = self.df.drop(columns="Location")       
+        
+        # get_dummies (variables sur le vent)
+        self.df= pd.get_dummies(self.df)
+        
+        # retrait "bourrin" des NA (à affiner plus tard)
+        self.df = self.df.dropna()
+        
+        # indique qu'on a deja fait cette etape
+        self.is_preprocessing_apres_analyse=True
+    
+    # ajoute les proprietes des villes au DF
+    def _ajoute_prop_locations(self):
+        # si la colonne de la latitude a déja été ajoutée, on sort
+        if 'lat' in self.df.columns:
+            return
+        # sinon, on charge les props des villes et on les ajoute au df
+        self.charge_villes()
+        self.df = pd.merge(self.df, self.df_cities, on='Location')
+                
+    # remplace RainTomorrow par 'Rain+j', qui indique s'il pleuvra j jours plus tard
+    # !! non fonctionnelle encore !!
+    def _remplace_rain_tomorrow(self, j):
+        df["DateFuture"] = df.index + pd.DateOffset(days=1)
+        for e in self.df.Location.unique():
+            self.df.loc[:,"Location"==e].RainTomorrow = self.df.apply(lambda row: self.df.loc[self.df.index == row['DateFuture'], "Location"==e].RainToday, axis=1)
         
     def analyse_donnees(self):
         # villes
@@ -110,6 +151,12 @@ class ProjetAustralie:
         axes.set_title("Nb d'enregistrements nuls par Location", fontsize=18)
         plt.show();
         
+    # --------------------------------------------
+    # affiche les graphes representant les NA et les moyennes en fonction du temps, pour chaque colonne numerique
+    def analyse_variables_temps(self):
+        for e in self.df.select_dtypes(include=['float64']).columns:
+            pa.analyse_variable_temps(e, "M")        
+            
     # --------------------------------------------
     # affiche les graphes representant les NA et les moyennes en fonction du temps
     def analyse_variable_temps(self, variable, frequence):
@@ -285,9 +332,11 @@ class ProjetAustralie:
             return -1
         
     # -----------------------------
+    # -----------------------------
+    # -----------------------------
     
     # in progress: j'aimerais tenter d'arriver à clusteriser automatiquement les villes
-    def clusterisation(self):
+    def clusterisation_temporelle(self):
         # tentative de determination de climats similaires dans certaines villes
         from sklearn.cluster import KMeans
         
@@ -299,10 +348,47 @@ class ProjetAustralie:
         kmeans.fit(df_cluster_f, sample_weight=df_cluster['Location_ID'])
         df_cluster['ClusterLocation'] = kmeans.labels_
         print(df_cluster[['Location', 'ClusterLocation']])
-    
+
+    # clusterisation des villes en 7 zones climatiques, basées sur la moyenne des variables sur les 10 ans de relevés
+    def clusterisation_groupee(self):
+        from sklearn.cluster import AgglomerativeClustering, MeanShift, estimate_bandwidth
+        from scipy.cluster.hierarchy import linkage, dendrogram
+
+        self._ajoute_prop_locations()
+
+        self.df_moyenne = self.df.groupby("Location").agg("mean")
+        self.df_moyenne = self.df_moyenne.dropna(axis=1)
+
+        # sur la suite, la normalisation et la clusterization ne se font pas sur les deux dernières colonnes,
+        # c'est à dire les coordonnées geographiques, pour que celles-ci n'influence pas l'appartenance à un cluster
+        scaler=MinMaxScaler()
+        pa.df_moyenne.iloc[:,:-2] = scaler.fit_transform(pa.df_moyenne.iloc[:,:-2])        
+
+        Z = linkage(self.df_moyenne.iloc[:,:-2], method='ward', metric = 'euclidean')
+        
+        plt.figure(figsize=(12,8))
+        dendrogram(Z, labels=self.df_moyenne.index, leaf_rotation=90., color_threshold=1.25)
+        plt.show()
+
+        # 7 clusters (pas optimal, juste pour voir)        
+        clf = AgglomerativeClustering(n_clusters=7)
+        clf.fit(self.df_moyenne.iloc[:,:-2])
+        self.clust_lab = clf.labels_
+
+        #self.charge_villes()
+        self.df_moyenne = self.df_moyenne.reset_index()
+        
+        fig = px.scatter_mapbox(self.df_moyenne, lat='lat', lon='lng', hover_name='Location', color=clf.labels_, text='Location', labels='Location', size_max=15, size='RainTomorrow', color_continuous_scale=px.colors.qualitative.Plotly).update_traces(marker=dict(size=10))
+        fig.update_layout(mapbox_style='open-street-map')
+        fig.show(renderer='browser')      
+   
+    # -----------------------------
+    # -----------------------------
     # -----------------------------
     # représentation geographique sur une carte    
     def synthetise_villes(self):
+        self.charge_villes()
+        
         #s_rt = self.df.groupby("Location")["RainTomorrow"].mean()
         df_rt = self.df.groupby("Location").agg({"RainTomorrow":'mean', "MaxTemp":'mean', "Pressure9am":'mean', 'Location':'count'})
         df_rt = df_rt.rename(columns={"Location":"Nb"})
@@ -313,14 +399,20 @@ class ProjetAustralie:
         fig.update_layout(mapbox_style='open-street-map')
         #fig.update_layout(margin={'r':0, 't':0, 'l':0, 'b':0})
         
-        fig.show(renderer='browser')
-              
+        fig.show(renderer='browser')             
+
+    # charge infos sur villes
+    def charge_villes(self):
+        # si deja chargé, on sort
+        if hasattr(self, "df_cities"):
+            return
+        # Créer un DataFrame avec les coordonnées de la ville de Paris        
+        self.df_cities = pd.read_csv("villes_coordonnees.csv",sep=";")     
+        
     
     # chargement des données geographiques
     def carte_australie(self):
-        
-        # Créer un DataFrame avec les coordonnées de la ville de Paris
-        self.df_cities = pd.read_csv("villes_coordonnees.csv",sep=";")     
+        self.charge_villes()
                 
         # Afficher la carte avec Plotly Express
         fig = px.scatter_mapbox(self.df_cities, lat='lat', lon='lng', hover_name='Location', color='lat', size=self.df_cities.lng/10-10, text='Location', labels='Location')
@@ -328,6 +420,57 @@ class ProjetAustralie:
         fig.update_layout(margin={'r':0, 't':0, 'l':0, 'b':0})
         fig.show(renderer='browser')
 
+    # -----------------------------
+    # -----------------------------
+    # --- Modelisation    ---
+    # -----------------------------
+    # -----------------------------
+
+    def _modelisation_preparation(self, scale):
+        
+        # si pas deja lancé
+        self.preprocessing_apres_analyse()
+        
+        X = self.df.drop(columns="RainTomorrow")
+        y = self.df.RainTomorrow
+
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=66) 
+        
+        if scale:
+            scaler = preprocessing.StandardScaler().fit(X_train)
+            X_train = scaler.transform(X_train)
+            X_test = scaler.transform(X_test)
+        self.X_train = X_train
+        self.y_train = y_train
+        self.X_test = X_test
+        self.y_test = y_test
+        
+
+    def _modelisation_matrice_confusion(self, clf):
+        y_pred = clf.predict(self.X_test)
+        print(pd.crosstab(self.y_test, y_pred, rownames=['Classe réelle'], colnames=['Classe prédite']))
+        
+        
+    def modelisation_knn(self):
+        from sklearn.neighbors import KNeighborsClassifier 
+   
+        clf_knn = KNeighborsClassifier(n_neighbors=5)              
+        self._modelisation_preparation(False)
+        
+        clf_knn.fit(self.X_train, self.y_train)
+        self._modelisation_matrice_confusion(clf_knn)
+
+
+    def modelisation_random_forest(self):
+        from sklearn.ensemble import RandomForestClassifier
+
+        clf_rf = RandomForestClassifier(n_jobs=-1, random_state=66 )
+        self._modelisation_preparation(False)
+        
+        clf_rf.fit(self.X_train, self.y_train)
+        self._modelisation_matrice_confusion(clf_rf)
+        
+    
 
 pa = ProjetAustralie()
 
