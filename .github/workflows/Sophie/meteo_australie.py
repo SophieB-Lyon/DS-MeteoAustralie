@@ -53,14 +53,40 @@ class ProjetAustralie:
         # supprime le nom de la ville, puisqu'on a ses coordonnées => pas de dummies sur le nom de la ville
         self.df = self.df.drop(columns="Location")       
         
-        # get_dummies (variables sur le vent)
-        self.df= pd.get_dummies(self.df)
+        # gestion des variables sur le vent
+        #self.df= pd.get_dummies(self.df)
+        self.remplace_direction_vent()
         
         # retrait "bourrin" des NA (à affiner plus tard)
         self.df = self.df.dropna()
-        
+                
         # indique qu'on a deja fait cette etape
         self.is_preprocessing_apres_analyse=True
+    
+    # remplace les variables categorielles de direction de vent par les composantes x et y
+    def remplace_direction_vent(self):
+        self._remplace_direction_vent("WindGustDir", "WindGustSpeed")
+        self._remplace_direction_vent("WindDir3pm", "WindSpeed3pm")
+        self._remplace_direction_vent("WindDir9am", "WindSpeed9am")       
+    
+    # remplace une colonne categorielle de direction de vent par deux colonnes numeriques
+    def _remplace_direction_vent(self, nom_colonne_dir: str, nom_colonne_speed: str):
+        df_direction = pd.DataFrame()
+        df_direction["dir"]=["E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW", "N", "NNE", "NE", "ENE"]
+        
+        # increment pour chacune des directions (sens horaire)
+        increment=-np.pi/8
+        
+        df_direction["rad"]=increment*df_direction.index
+        df_direction["sin"]=np.sin(df_direction.rad)
+        df_direction["cos"]=np.cos(df_direction.rad)
+        
+        # jointure pour deduire les cos et sin multipliés par la vitesse
+        df_temp = self.df.merge(df_direction, left_on=nom_colonne_dir, right_on="dir")
+        df_temp[nom_colonne_dir+"_X"]=df_temp.cos*df_temp[nom_colonne_speed]
+        df_temp[nom_colonne_dir+"_Y"]=df_temp.sin*df_temp[nom_colonne_speed]
+        
+        self.df = df_temp.drop(columns=["cos", "sin", "rad", "dir", nom_colonne_dir])      
     
     # ajoute les proprietes des villes au DF
     def _ajoute_prop_locations(self):
@@ -104,18 +130,20 @@ class ProjetAustralie:
         df_num = self.df.select_dtypes(include=['float64'])
         
         # affichage des correlations 
-        fig, axes = plt.subplots(1,2,figsize=(24,12))
+        fig, axes = plt.subplots(1,1,figsize=(18,12))
         
         # correlations fortes
         # => aucune vairable n'est fortement correlee avec RainTomorrow
-        hm = sns.heatmap(abs(df_num.corr())>.5, cmap="binary", ax=axes[0])
-        axes[0].set_title("Corrélations fortes (>.5)", fontsize=18)
+        #hm = sns.heatmap(abs(df_num.corr())>.5, cmap="binary", ax=axes[0])
+        #axes[0].set_title("Corrélations fortes (>.5)", fontsize=18)
         
         # toutes correlations
         # => correlations intéressantes (.25<corr<.5) avec Sunshine, Humidity3pm, Humidity9am, Cloud9am (dommage...), Cloup9pm (idem), RainToday
         cmap_25 = sns.color_palette(['red', 'orange', 'yellow', 'white', 'white', 'yellow', 'orange', 'red'])
-        sns.heatmap(df_num.corr(), cmap=cmap_25, annot=True, fmt=".1f", ax=axes[1], vmin=-1)
-        axes[1].set_title("Corrélations", fontsize=18)
+        
+        dfcorr=df_num.corr()
+        sns.heatmap(dfcorr, cmap=cmap_25, annot=True, fmt=".2f", ax=axes, vmin=-1, vmax=1, mask=np.triu(dfcorr))
+        axes.set_title("Corrélations", fontsize=18)
         
         print(df_num.corr())
         
@@ -301,7 +329,7 @@ class ProjetAustralie:
         var_vent=["WindGustDir", "WindDir9am", "WindDir3pm"]
         for e in var_vent:
             self._correlation_var(e)
-        print("\np-value issu du Chi2 entre les variables du vent et RainTomorrow:\n",self.df_chi2)
+        print("\np-value issue du Chi2 entre les variables du vent et RainTomorrow:\n",self.df_chi2)
     
         print ("\n Villes ayant au moins une p-value >.05\n", self.df_chi2[self.df_chi2.max(axis=1)>.05])
     
@@ -474,7 +502,7 @@ class ProjetAustralie:
 
 pa = ProjetAustralie()
 
-pa.analyse_donnees()
+#pa.analyse_donnees()
 #pa.preprocessing_apres_analyse()
 #pa.carte_australie()
 #pa.synthetise_villes()
