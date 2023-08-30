@@ -62,9 +62,34 @@ def remove_cities_with_NNA(df, num_citys):
     df_filtered = df.loc[~df["Location"].isin(cities_to_remove)]
     return df_filtered
 
+def copier_donnes_proches(datos_climaticos, fac_similitud):  #Trouver la ville la plus corrélée pour chaque variable et remplacer les données nulles par celles-ci si le ratio est supérieur à Fac_similarity. cela ne fonctionne toujours pas.
+    variables = datos_climaticos.select_dtypes(include=['number']).columns.tolist()
+    for variable in variables:
+        df_pivot = datos_climaticos.pivot(index='Date', columns='Location', values=variable)
+        correlaciones_ciudades = df_pivot.corr()
+        
+        for ville in df_pivot.columns:
+            correlacion_ville = correlaciones_ciudades[ville].drop(ville)
+            ville_plus_correlee = correlacion_ville.idxmax()
+            correlacion_maximale = correlacion_ville.max()
+            
+          
+            if correlacion_maximale > fac_similitud:
+                valeurs_manquantes = datos_climaticos[(datos_climaticos["Location"] == ville) & datos_climaticos[variable].isnull()]
+                
+                if not valeurs_manquantes.empty:
+                    valeurs_a_copier = datos_climaticos[(datos_climaticos["Location"] == ville_plus_correlee) & ~datos_climaticos[variable].isnull()]
+                    dates_manquantes = valeurs_manquantes["Date"]
+                    datos_climaticos.loc[valeurs_manquantes.index, variable] = valeurs_a_copier[valeurs_a_copier["Date"].isin(dates_manquantes)][variable].values
+    return datos_climaticos
+
+
+
+
 
 
 df = remove_cities_with_NNA(df, 4)
+#df2 = copier_donnes_proches(df, 0.8)
 df_r = reductor_df(df, "Date", 0.07)   #Reduir taille de Dataframe
 df_r = transform_varia_cualit(df_r, ["Location", "WindDir3pm", "WindDir9am"])
 df_r = select_numeric(df_r)            #Suprimmer column non-numeric
