@@ -26,7 +26,7 @@ class ProjetAustralie:
         self.df = pd.read_csv("weatherAUS.csv")
         self.df.info()
         print(self.df.head())   
-    
+
     def preprocessing(self):
         # remplace Yes/No par 0/1
         self.df = self.df.replace({"No":0, "Yes":1})
@@ -190,7 +190,7 @@ class ProjetAustralie:
     def analyse_variable_temps(self, variable, frequence):
         
         # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
-        if ~hasattr(self, "df_resample"):
+        if not hasattr(self, "df_resample"):
             self.reindexation_temporelle()
             
         df = self.df_resample[['Location', variable]]       
@@ -265,7 +265,7 @@ class ProjetAustralie:
     # comparaison des NA à partir du DF d'origine et celui resamplé
     def comparaison_avec_sans_dates_reindexees(self, location, variable, frequence):
         # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
-        if ~hasattr(self, "df_resample"):
+        if not hasattr(self, "df_resample"):
             self.reindexation_temporelle()
 
         fig, axes = plt.subplots(2,1,figsize=(24,12))
@@ -321,6 +321,65 @@ class ProjetAustralie:
         axes[1].set_ylabel("MaxTemp (°)")
 
         plt.show();
+    
+    # analyses de la saisonalité (in progress)
+    def analyses_temporelles_saisonalite(self, colonne: str, location:str, periode:int):
+        from statsmodels.tsa.seasonal import seasonal_decompose
+        import statsmodels.api as sm
+        
+        # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
+        if not hasattr(self, "df_resample"):
+            self.reindexation_temporelle()
+
+        self.df_resample.loc[self.df_resample.Location==location,colonne] = self.df_resample.loc[self.df_resample.Location==location,colonne].fillna(self.df.loc[self.df.Location==location,colonne].mean())
+        
+        if location=="":
+            serie = self.df_resample[colonne].resample('D').mean().dropna()
+        else:
+            serie = self.df_resample.loc[self.df_resample.Location==location,colonne].dropna()
+        
+        
+        sd = seasonal_decompose(serie, period=periode)#, model='multiplicative')
+        #sd.plot()
+        #plt.show();
+        
+        fig, ax = plt.subplots(2,2,figsize=(24,8))
+        cvs = serie - sd.seasonal
+        cvst = cvs - sd.trend # =sd.resid
+
+        ax = ax.reshape(-1)
+
+        serie.plot(ax=ax[0])
+        ax[0].set_title("avec saisonnalité")
+
+        cvs.plot(ax=ax[1])
+        ax[1].set_title("sans saisonnalité")
+        
+        cvst.plot(ax=ax[2])
+        ax[2].set_title("sans saisonnalité ni tendance (=bruit uniquement)")
+        
+        
+        sd.seasonal.plot(ax=ax[3])
+        #!sd.resid.plot(ax=ax[3])
+        ax[3].set_title("saisonnalité")
+        plt.suptitle("Analyse tendance/saisonnalité/bruit de "+colonne+ "Location: "+location+ "Periode:"+ (str)(periode))
+        plt.show();
+        
+        self.sd = sd
+        
+    def test_max_saisonalite(self):
+        for i in range(345,370,1):
+            self.analyses_temporelles_saisonalite("MaxTemp","Melbourne", i)
+            print ("per ",i, 
+                   "\t delta season: {:.2f}\
+                    delta resid: {:.2f}\
+                    std seas: {:.2f}\
+                    std resid: {:.2f}"
+                    .format(self.sd.seasonal.max() - self.sd.seasonal.min(),
+                            self.sd.resid.max() - self.sd.resid.min(),
+                            self.sd.seasonal.std(),
+                            self.sd.resid.std()
+                            ))
     
     # -----------------------------
     # calcule la correlation avec chaque variable qualitative du vent
