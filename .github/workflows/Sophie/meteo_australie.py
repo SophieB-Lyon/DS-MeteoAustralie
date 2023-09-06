@@ -14,6 +14,8 @@ from scipy.stats import chi2_contingency
 from sklearn.model_selection import train_test_split
 from sklearn import preprocessing
 from sklearn.preprocessing import MinMaxScaler
+from sklearn.impute import KNNImputer
+
 
 class ProjetAustralie:
     
@@ -331,11 +333,17 @@ class ProjetAustralie:
         if not hasattr(self, "df_resample"):
             self.reindexation_temporelle()
 
-        self.df_resample.loc[self.df_resample.Location==location,colonne] = self.df_resample.loc[self.df_resample.Location==location,colonne].fillna(self.df.loc[self.df.Location==location,colonne].mean())
+        #self.df_resample.loc[self.df_resample.Location==location,colonne] = self.df_resample.loc[self.df_resample.Location==location,colonne].fillna(self.df.loc[self.df.Location==location,colonne].mean())
         
         if location=="":
-            serie = self.df_resample[colonne].resample('D').mean().dropna()
+            # remplacement des NA par la moyenne. si autre approche (knn-imputer par exemple), il convient de l'appliquer avant cette étape
+            self.df_resample.loc[:,colonne] = self.df_resample.loc[:,colonne].fillna(self.df.loc[:,colonne].mean())
+            # calcule de la moyenne pour la frequence donnée (quotidienne, là) pour toutes les Location, suivi d'un dropna
+            serie = self.df_resample[colonne].resample('D').mean().dropna()       
         else:
+            # remplacement des NA par la moyenne. si autre approche (knn-imputer par exemple), il convient de l'appliquer avant cette étape
+            self.df_resample.loc[self.df_resample.Location==location,colonne] = self.df_resample.loc[self.df_resample.Location==location,colonne].fillna(self.df.loc[self.df.Location==location,colonne].mean())
+            # enleve les na (par securité, car inutile normalement vu qu'on vient de faire un fillna)
             serie = self.df_resample.loc[self.df_resample.Location==location,colonne].dropna()
         
         
@@ -343,30 +351,54 @@ class ProjetAustralie:
         #sd.plot()
         #plt.show();
         
-        fig, ax = plt.subplots(2,2,figsize=(24,8))
+        fig, ax = plt.subplots(3,2,figsize=(24,12))
         cvs = serie - sd.seasonal
         cvst = cvs - sd.trend # =sd.resid
 
         ax = ax.reshape(-1)
 
         serie.plot(ax=ax[0])
-        ax[0].set_title("avec saisonnalité")
+        ax[0].set_title("donnnées initiales (avec saisonnalité)")
 
         cvs.plot(ax=ax[1])
         ax[1].set_title("sans saisonnalité")
         
         cvst.plot(ax=ax[2])
-        ax[2].set_title("sans saisonnalité ni tendance (=bruit uniquement)")
-        
+        ax[2].set_title("sans saisonnalité ni tendance (=bruit uniquement)")      
         
         sd.seasonal.plot(ax=ax[3])
         #!sd.resid.plot(ax=ax[3])
         ax[3].set_title("saisonnalité")
+
+        sd.trend.plot(ax=ax[4])
+        ax[4].set_title("tendance")
+
         plt.suptitle("Analyse tendance/saisonnalité/bruit de "+colonne+ "Location: "+location+ "Periode:"+ (str)(periode))
         plt.show();
         
         self.sd = sd
         
+    # analyse la saisonnalité de toutes les variables des colonnes numeriques du DF
+    def analyse_temporelle_saisonnalite_toutes_variables(self):
+        coln = self.df.select_dtypes(include=['number']).columns
+        
+        for c in coln:
+            self.analyses_temporelles_saisonalite(c, "", 365)
+    
+    # affiche graphe d'autocorrélation
+    def analyse_temporelle_autocorr(self, colonne: str):
+        from statsmodels.graphics.tsaplots import plot_pacf, plot_acf
+        from pandas.plotting import autocorrelation_plot
+        plt.figure(figsize=(24,12))
+        autocorrelation_plot(pa.df_resample[colonne].resample('D').mean().diff(1).dropna(), label=colonne)
+        plt.show();
+        
+        fig, ax = plt.subplots(2,1,figsize=(24,12))
+        plot_acf(pa.df_resample[colonne].resample('D').mean().diff(1).dropna(), lags = 1200, ax=ax[0])
+        plot_pacf(pa.df_resample[colonne].resample('D').mean().diff(1).dropna(), lags = 1200, ax=ax[1])
+        plt.show();
+    
+    # verifie le periode optimale de saisonnalité
     def test_max_saisonalite(self):
         for i in range(345,370,1):
             self.analyses_temporelles_saisonalite("MaxTemp","Melbourne", i)
@@ -380,6 +412,33 @@ class ProjetAustralie:
                             self.sd.seasonal.std(),
                             self.sd.resid.std()
                             ))
+    
+    # -----------------------------
+    # -----------------------------
+    # --- gestion des NA
+    # -----------------------------
+    # -----------------------------
+    
+    # KNN imputer - (sur une seule ville pour le moment: 40mn pour lancer avec knn=1 sur tout le dataset!)
+    def gestion_na_knni(self):
+        
+        knni = KNNImputer(n_neighbors=2)
+        
+        coln = self.df_resample.select_dtypes(include=['number']).columns
+        print ("coln : ", coln)
+        #self.df_resample_nona = pd.DataFrame(knni.fit_transform(self.df_resample), columns=self.df_resample.columns, index=self.df_resample.index)
+        
+        self.df_resample_nona = self.df_resample.copy()
+        
+        self.df_resample_nona = self.df_resample_nona[self.df_resample_nona.Location=="Melbourne"]
+        
+        self.df_resample_nona[coln] = pd.DataFrame(knni.fit_transform(self.df_resample_nona[coln]), columns=coln, index=self.df_resample_nona.index)
+        
+        fig, ax = plt.subplots(2,1, figsize=(18,12))
+        ax[0].plot(self.df_resample.loc[pa.df_resample.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données d\'origine")
+        ax[0].legend()
+        ax[1].plot(self.df_resample_nona.loc[pa.df_resample_nona.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données extrapolées avec KNN Imputer")
+        ax[1].legend()
     
     # -----------------------------
     # calcule la correlation avec chaque variable qualitative du vent
