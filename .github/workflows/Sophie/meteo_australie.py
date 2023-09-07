@@ -87,8 +87,9 @@ class ProjetAustralie:
         df_temp = self.df.merge(df_direction, left_on=nom_colonne_dir, right_on="dir")
         df_temp[nom_colonne_dir+"_X"]=df_temp.cos*df_temp[nom_colonne_speed]
         df_temp[nom_colonne_dir+"_Y"]=df_temp.sin*df_temp[nom_colonne_speed]
+        df_temp[nom_colonne_dir+"_RAD"]=df_temp["rad"]  # on garde rad pour les graphes
         
-        self.df = df_temp.drop(columns=["cos", "sin", "rad", "dir", nom_colonne_dir])      
+        self.df = df_temp.drop(columns=["cos", "sin", "rad", "dir", nom_colonne_dir])
     
     # ajoute les proprietes des villes au DF
     def _ajoute_prop_locations(self):
@@ -232,9 +233,7 @@ class ProjetAustralie:
             yaxis_title="NbNA"
         )        
         # Afficher le graphique
-        fig.show(renderer='browser')
-
-        
+        fig.show(renderer='browser')       
     
     # reindexe les dates pour qu'il n'y ait aucun trou
     def reindexation_temporelle(self):
@@ -399,6 +398,63 @@ class ProjetAustralie:
         plot_pacf(pa.df_resample[colonne].resample('D').mean().diff(1).dropna(), lags = 1200, ax=ax[1])
         plt.show();
     
+    # trace l'histogramme des precipitation et courbe des temperatures pour l'australie et pour chaque Location
+    def analyse_annuelle_integrale(self):
+        self.analyse_annuelle("")
+        for lo in self.df.Location.unique():
+            self.analyse_annuelle(lo)
+    
+    # fait une moyenne annuelle
+    def analyse_annuelle(self, location:str):
+        # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
+        if not hasattr(self, "df_resample"):
+            self.reindexation_temporelle()
+        
+        self._ajoute_colonnes_dates()
+        
+        # retrait des données < 1/1/2009 et >31/12/2016 pour avoir des années complètes
+        df_resample = self.df_resample.loc['2009-01-01':'2016-12-31']
+        
+        if (location==""):
+            df_filtre = df_resample.resample('D').mean().dropna()       
+            df_filtre["AAMM"] = df_filtre.Annee.astype(str)+"-"+df_filtre.Mois.astype(str)
+        else:
+            df_filtre = df_resample[df_resample.Location == location]
+        
+        self.da = df_filtre.groupby('AAMM').agg({'MaxTemp': 'mean', 'Rainfall': 'sum', 'Annee':'max', 'Mois':'max'}).reset_index()
+        self.da2 = self.da.groupby("Mois").agg({'MaxTemp': 'mean', 'Rainfall': 'mean'}).reset_index()
+        
+        fig, ax1 = plt.subplots(figsize=(12, 8))
+        
+        ax1.plot(self.da2['Mois'], self.da2['MaxTemp'], label='Température (°C)', color='r')
+        ax1.set_yticks(np.arange(0,41,5))
+        ax1.set_ylabel("Température (°C)")
+
+        ax2 = ax1.twinx()
+        ax2.bar(self.da2['Mois'], self.da2['Rainfall'], label='Précipitations (mm)', color='#06F', alpha=.5)
+        ax2.set_yticks(np.arange(0,201,10))
+        ax2.set_ylabel("Précipitations (mm)")
+
+        
+        nom_mois = ['Jan', 'Fév', 'Mar', 'Avr', 'Mai', 'Juin', 'Juil', 'Août', 'Sep', 'Oct', 'Nov', 'Déc']
+        plt.xticks(ticks=np.arange(len(nom_mois))+1, labels=nom_mois)
+        nom_titre = 'Températures moyennes mensuelles et cumul des précipations\nAnnées 2009 à 2016'
+        if (location == ""):
+            nom_titre = nom_titre+" - Australie complète"
+        else:
+            nom_titre = nom_titre+" - "+location
+        plt.title(nom_titre)
+        plt.show();
+        
+        
+    def _ajoute_colonnes_dates(self):
+        self.df_resample["Date"] = self.df_resample.index
+        self.df_resample["Annee"] = self.df_resample.Date.dt.year
+        self.df_resample["Mois"] = self.df_resample.Date.dt.month
+        self.df_resample["AAMM"] = self.df_resample.Annee.astype(str)+"-"+self.df_resample.Mois.astype(str)
+        
+    
+    
     # verifie le periode optimale de saisonnalité
     def test_max_saisonalite(self):
         for i in range(345,370,1):
@@ -414,6 +470,41 @@ class ProjetAustralie:
                             self.sd.resid.std()
                             ))
     
+
+    # affiche repartition vent    
+    def graphe_vent(self, location:str):
+        if not hasattr(self.df, "WindGustDir_RAD"):       
+            self.remplace_direction_vent()
+        
+        if (location==""):
+            df_filtre = self.df
+        else:
+            df_filtre = self.df[self.df.Location == location]
+       
+        self.tt = df_filtre.WindDir3pm_RAD
+        
+        vc = df_filtre.WindDir3pm_RAD.value_counts(normalize=True).sort_index()
+        #vc.append(vc[0]) # pour fermer le tracé
+        
+        print (vc)
+        self.vc = vc
+        
+        plt.figure(figsize=(8, 8))
+        ax = plt.subplot(111, polar=True)
+        #ax.set_rlim(0,1/8)
+        ax.fill(vc.index, vc.values, '#4A6', alpha=.8)
+
+        ax.set_xticks(np.arange(2*np.pi, 0, -np.pi/8))
+        ax.set_xticklabels(["E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW", "N", "NNE", "NE", "ENE"])
+        ax.set_yticklabels([])
+
+        nom_title="Distribution des directions du vent - "
+        if (location==""):
+            nom_title+="Australie complète"
+        else:
+            nom_title+=location
+        plt.title(nom_title)
+
     # -----------------------------
     # -----------------------------
     # --- gestion des NA
