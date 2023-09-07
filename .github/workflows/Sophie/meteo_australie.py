@@ -390,6 +390,7 @@ class ProjetAustralie:
         from statsmodels.graphics.tsaplots import plot_pacf, plot_acf
         from pandas.plotting import autocorrelation_plot
         plt.figure(figsize=(24,12))
+        
         autocorrelation_plot(pa.df_resample[colonne].resample('D').mean().diff(1).dropna(), label=colonne)
         plt.show();
         
@@ -422,7 +423,7 @@ class ProjetAustralie:
     # KNN imputer - (sur une seule ville pour le moment: 40mn pour lancer avec knn=1 sur tout le dataset!)
     def gestion_na_knni(self):
         
-        knni = KNNImputer(n_neighbors=2)
+        knni = KNNImputer(n_neighbors=10)
         
         coln = self.df_resample.select_dtypes(include=['number']).columns
         print ("coln : ", coln)
