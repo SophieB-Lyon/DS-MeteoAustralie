@@ -12,7 +12,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 import matplotlib.pyplot as plt
-
+from sklearn.preprocessing import StandardScaler
+import seaborn as sns
 
 df = pd.read_csv("weatherAUS.csv")
 df.RainToday = df['RainToday'].replace({'Yes': 1, 'No': 0})
@@ -44,7 +45,7 @@ def select_numeric(dataframe):
 
 def knn_for_NNA(df, n_neighbors):
     column_names = df.columns
-    knn_imputer = KNNImputer(n_neighbors=1)
+    knn_imputer = KNNImputer(n_neighbors= n_neighbors)
     df_knn = knn_imputer.fit_transform(df)
     df_knn = pd.DataFrame(df_knn, columns=column_names)
     return df_knn
@@ -62,6 +63,14 @@ def remove_cities_with_NNA(df, num_citys):
     df_filtered = df.loc[~df["Location"].isin(cities_to_remove)]
     return df_filtered
 
+def app_standard_scaler(df, col_no_scaler): ##Applique un StandardScaler à un DataFrame.
+    scaler = StandardScaler()
+    columnas_to_scaler = [col for col in df.columns if col not in col_no_scaler]
+    df[columnas_to_scaler] = scaler.fit_transform(df[columnas_to_scaler])
+    return df
+
+
+
 def copier_donnes_proches(datos_climaticos, fac_similitud): #Trouver la ville la plus corrélée pour chaque variable et remplacer les données nulles par celles-ci si le ratio est supérieur à Fac_similitud. cela ne fonctionne toujours pas.
     variables = datos_climaticos.select_dtypes(include=['number']).columns.tolist()
     for variable in variables:
@@ -73,27 +82,26 @@ def copier_donnes_proches(datos_climaticos, fac_similitud): #Trouver la ville la
             ville_plus_correlee = correlacion_ville.idxmax()
             correlacion_maximale = correlacion_ville.max()
             
-            
-          
             if correlacion_maximale > fac_similitud:
                 valeurs_manquantes = datos_climaticos[(datos_climaticos["Location"] == ville) & datos_climaticos[variable].isnull()]
                         
                 if not valeurs_manquantes.empty:
                     valeurs_a_copier = datos_climaticos[(datos_climaticos["Location"] == ville_plus_correlee) & (datos_climaticos["Date"].isin(valeurs_manquantes["Date"]))]
                     valeurs_manquantes = valeurs_manquantes[ valeurs_manquantes["Date"].isin(valeurs_a_copier["Date"]) ] #Correction des Valeurs_manqantes car la ville la plus corrélée ne dispose pas toujours des données à toutes les dates nécessaires. 
-                    datos_climaticos.loc[valeurs_manquantes.index, variable] = valeurs_a_copier[variable].values#     return datos_climaticos
+                    datos_climaticos.loc[valeurs_manquantes.index, variable] = valeurs_a_copier[variable].values*correlacion_maximale #  remplace les valeurs manquantes par celles de la ville la plus corrélée, affectées par le facteur de corrélation.
     return datos_climaticos
 
 X_fac_similitud = []
 Y_score = []
 
 
-for i in np.arange(0.6, 1.01, 0.05):
-    df = remove_cities_with_NNA(df, 0)
+for i in np.arange(0.85, 1.01, 0.025):
+    #Rdf = remove_cities_with_NNA(df, 0)
     df2 = copier_donnes_proches(df, i)
-    df_r = reductor_df(df, "Date", 0.7)   #Reduir taille de Dataframe
+    df_r = reductor_df(df, "Date", 0.3)   #Reduir taille de Dataframe
     df_r = transform_varia_cualit(df_r, ["Location", "WindDir3pm", "WindDir9am"])
     df_r = select_numeric(df_r)            #Suprimmer column non-numeric
+    df_r = app_standard_scaler(df_r, ["RainToday", "RainTomorrow"])
     df_knn = knn_for_NNA(df_r, 2)
     X_train, X_test, y_train, y_test = train_test(df_knn, "RainTomorrow", 0.2)
 
@@ -111,10 +119,20 @@ print(X_fac_similitud, Y_score)
 
 plt.figure(figsize=(8, 6))
 plt.plot(X_fac_similitud, Y_score)
-plt.xlabel("Fac_similitud")
+plt.xlabel("Fac_similitude")
 plt.ylabel("SCORE ML MODEL")
-plt.yticks([round(i,3) for i in np.linspace(0.85, 0.86, 10)])
+plt.yticks([round(i,3) for i in np.linspace(0.846, 0.854, 10)])
 plt.show()
 
 
+
+df_pivot = df.pivot(index='Date', columns='Location', values="MaxTemp")
+correlation_villes = df_pivot.corr()
+cmap = sns.color_palette("coolwarm", as_cmap=True, n_colors=20)
+plt.figure(figsize=(20, 20))
+plt.title("Corrélations de la variable MaxTemp", fontsize=25)
+plt.xlabel('Eje X', fontsize=20)
+plt.ylabel('Eje Y', fontsize=20)
+sns.heatmap(correlation_villes, annot=True, cmap=cmap, center=0, linewidths=.5, fmt=".1f", vmin=-1, vmax=1)
+plt
 
