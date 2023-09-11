@@ -75,11 +75,14 @@ class ProjetAustralie:
         # affiche matrice de correlation apres
         self.matrice_corr_quyen(self.df.drop(columns="Climat"))
         
+        for clim in np.arange(7):
+            self.matrice_corr_quyen(self.df[self.df.Climat==clim].drop(columns="Climat"), "Corrélations climat n° "+str(clim))
+        
         # indique qu'on a deja fait cette etape
         self.is_preprocessing_apres_analyse=True
     
     # affiche matrice corr comme Quyen
-    def matrice_corr_quyen(self, df):
+    def matrice_corr_quyen(self, df, titre:str="Corrélations entre variables après ajout des nouvelles variables"):
         cmap = sns.diverging_palette(260, 20, as_cmap=True)
 
         fig_corr, ax = plt.subplots(figsize=(12,12))
@@ -92,7 +95,7 @@ class ProjetAustralie:
                     fmt='.2f',
                     cmap=cmap,
                     ax=ax)
-        ax.set_title("Corrélations entre variables après ajout des nouvelles variables", fontsize=20)
+        ax.set_title(titre, fontsize=20)
         
     # remplace les variables categorielles de direction de vent par les composantes x et y
     def remplace_direction_vent(self):
