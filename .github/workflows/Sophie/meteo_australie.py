@@ -178,7 +178,7 @@ class ProjetAustralie:
         print("\n Nb de valeurs nulles par Location pour chaque variable\n")
         print (df_nb_na.iloc[:,1:])
         
-        sns.heatmap(df_nb_na.iloc[:,1:], cmap='gnuplot', annot=True, fmt="d")
+        sns.heatmap(df_nb_na.iloc[:,1:], cmap='gnuplot2_r', annot=True, fmt="d")
         axes.set_title("Nb d'enregistrements nuls par Location", fontsize=18)
         plt.show();
         
@@ -345,6 +345,7 @@ class ProjetAustralie:
             # enleve les na (par securité, car inutile normalement vu qu'on vient de faire un fillna)
             serie = self.df_resample.loc[self.df_resample.Location==location,colonne].dropna()
         
+        serie = serie["2008-12-01":"2012-12-01"]
         
         sd = seasonal_decompose(serie, period=periode)#, model='multiplicative')
         #sd.plot()
@@ -372,17 +373,17 @@ class ProjetAustralie:
         sd.trend.plot(ax=ax[4])
         ax[4].set_title("tendance")
 
-        plt.suptitle("Analyse tendance/saisonnalité/bruit de "+colonne+ "Location: "+location+ "Periode:"+ (str)(periode))
+        plt.suptitle("Analyse tendance/saisonnalité/bruit de "+colonne+ " - Location: "+location+ " - Periode:"+ (str)(periode))
         plt.show();
         
         self.sd = sd
         
     # analyse la saisonnalité de toutes les variables des colonnes numeriques du DF
-    def analyse_temporelle_saisonnalite_toutes_variables(self):
+    def analyse_temporelle_saisonnalite_toutes_variables(self, location:str):
         coln = self.df.select_dtypes(include=['number']).columns
         
         for c in coln:
-            self.analyses_temporelles_saisonalite(c, "", 365)
+            self.analyses_temporelles_saisonalite(c, location, 365)
     
     # affiche graphe d'autocorrélation
     def analyse_temporelle_autocorr(self, colonne: str):
@@ -444,7 +445,8 @@ class ProjetAustralie:
         else:
             nom_titre = nom_titre+" - "+location
         plt.title(nom_titre)
-        plt.show();
+        plt.savefig("graphes\\DiagClim_"+location)
+        plt.show()
         
         
     def _ajoute_colonnes_dates(self):
@@ -481,9 +483,8 @@ class ProjetAustralie:
         else:
             df_filtre = self.df[self.df.Location == location]
        
-        self.tt = df_filtre.WindDir3pm_RAD
         
-        vc = df_filtre.WindDir3pm_RAD.value_counts(normalize=True).sort_index()
+        vc = df_filtre.WindGustDir_RAD.value_counts(normalize=True).sort_index()
         #vc.append(vc[0]) # pour fermer le tracé
         
         print (vc)
@@ -492,19 +493,25 @@ class ProjetAustralie:
         plt.figure(figsize=(8, 8))
         ax = plt.subplot(111, polar=True)
         #ax.set_rlim(0,1/8)
-        ax.fill(vc.index, vc.values, '#4A6', alpha=.8)
+        ax.fill(vc.index, vc.values, '#48A', alpha=.8)
 
         ax.set_xticks(np.arange(2*np.pi, 0, -np.pi/8))
         ax.set_xticklabels(["E", "ESE", "SE", "SSE", "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW", "N", "NNE", "NE", "ENE"])
         ax.set_yticklabels([])
 
-        nom_title="Distribution des directions du vent - "
+        nom_title="Distribution des directions du vent (WindGustDir) - "
         if (location==""):
             nom_title+="Australie complète"
         else:
             nom_title+=location
         plt.title(nom_title)
+        #plt.savefig("graphes\\WinGustDir_"+location)
 
+    # affiche le graphe de toutes les location
+    def graphe_vent_integral(self):
+        for lo in self.df.Location.unique():
+            self.graphe_vent(lo)
+        
     # -----------------------------
     # -----------------------------
     # --- gestion des NA
@@ -514,7 +521,7 @@ class ProjetAustralie:
     # KNN imputer - (sur une seule ville pour le moment: 40mn pour lancer avec knn=1 sur tout le dataset!)
     def gestion_na_knni(self):
         
-        knni = KNNImputer(n_neighbors=10)
+        knni = KNNImputer(n_neighbors=1)
         
         coln = self.df_resample.select_dtypes(include=['number']).columns
         print ("coln : ", coln)
@@ -634,9 +641,11 @@ class ProjetAustralie:
         df_rt = df_rt.merge(self.df_cities, left_index=True, right_on='Location')
         
         fig = px.scatter_mapbox(df_rt, lat='lat', lon='lng', hover_name='Location', color='MaxTemp', size='RainTomorrow')
+#        fig = px.scatter_geo(df_rt, lat='lat', lon='lng', hover_name='Location', color='MaxTemp', size='RainTomorrow')
         fig.update_layout(mapbox_style='open-street-map')
         #fig.update_layout(margin={'r':0, 't':0, 'l':0, 'b':0})
-        
+        #fig.update_geos(projection_type='mercator')
+
         fig.show(renderer='browser')             
 
     # charge infos sur villes
