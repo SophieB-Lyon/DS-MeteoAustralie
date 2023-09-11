@@ -39,12 +39,19 @@ class ProjetAustralie:
         # si deja fait, on sort
         if self.is_preprocessing_apres_analyse:
             return
+
+        # matrice avant
+        self.matrice_corr_quyen(self.df.select_dtypes(include=['float64']))
+
+        # determine les climats
+        self.clusterisation_groupee()
+        self.df = self.df.merge(self.df_climat, on="Location")      
         
         # ajout de AmplitudeTemp
         self.df["AmplitudeTemp"]=self.df.MaxTemp - self.df.MinTemp
         
-        # suppression des variable très fortement correlées
-        self.df = self.df.drop(columns=["MinTemp", "Temp9am", "Temp3pm", "Pressure3pm"])
+        # suppression des variable très fortement correlées et de celles trop manquantes
+        self.df = self.df.drop(columns=["MinTemp", "Temp9am", "Temp3pm", "Pressure3pm", "Sunshine", "Evaporation", "Cloud9am", "Cloud3pm"])              
         
         # supprime la date (dispo en index)
         self.df = self.df.drop(columns="Date")
@@ -52,19 +59,41 @@ class ProjetAustralie:
         # ajoute les proprietes des villes
         self._ajoute_prop_locations()
         
-        # supprime le nom de la ville, puisqu'on a ses coordonnées => pas de dummies sur le nom de la ville
-        self.df = self.df.drop(columns="Location")       
-        
         # gestion des variables sur le vent
         #self.df= pd.get_dummies(self.df)
         self.remplace_direction_vent()
         
+        # supprime variables redondantes du vent
+        self.df = self.df.drop(columns=["WindGustDir_RAD", "WindDir9am_RAD", "WindDir3pm_RAD", "WindGustSpeed", "WindSpeed9am", "WindSpeed3pm"])       
+        
         # retrait "bourrin" des NA (à affiner plus tard)
         self.df = self.df.dropna()
                 
+        # supprime le nom de la ville, puisqu'on a ses coordonnées => pas de dummies sur le nom de la ville
+        self.df = self.df.drop(columns="Location")              
+        
+        # affiche matrice de correlation apres
+        self.matrice_corr_quyen(self.df.drop(columns="Climat"))
+        
         # indique qu'on a deja fait cette etape
         self.is_preprocessing_apres_analyse=True
     
+    # affiche matrice corr comme Quyen
+    def matrice_corr_quyen(self, df):
+        cmap = sns.diverging_palette(260, 20, as_cmap=True)
+
+        fig_corr, ax = plt.subplots(figsize=(12,12))
+        corr_mat = df.corr()
+        mask = np.triu(np.ones_like(corr_mat))
+
+        sns.heatmap(corr_mat,
+                    mask=mask,
+                    annot=True,
+                    fmt='.2f',
+                    cmap=cmap,
+                    ax=ax)
+        ax.set_title("Corrélations entre variables après ajout des nouvelles variables", fontsize=20)
+        
     # remplace les variables categorielles de direction de vent par les composantes x et y
     def remplace_direction_vent(self):
         self._remplace_direction_vent("WindGustDir", "WindGustSpeed")
@@ -165,21 +194,25 @@ class ProjetAustralie:
 
         # -------------------------------------------
 
-        fig, axes = plt.subplots(1,1,figsize=(24,12))
+        fig, axes = plt.subplots(1,1,figsize=(24,18))
         
         # affiche le nb de NA pour chaque variable et pour chaque Location
         df_nb_na = self.df.groupby('Location').apply(lambda x: x.isna().sum()).drop(columns=["Location"])
         df_nb = self.df.groupby('Location').size().reset_index(name='NbTotEnregistrements\n(nuls ou non)')
         
         df_nb_na = df_nb_na.merge(df_nb, left_index=True, right_on='Location').set_index("Location")
+
+        self.df_nb_na=df_nb_na        
+        # modifie pour avoir des %
+        df_nb_na.iloc[:,:-1] = df_nb_na.iloc[:,:-1].div(df_nb_na.iloc[:,-1], axis=0)*100
         
         self.df_nb_na=df_nb_na
         
-        print("\n Nb de valeurs nulles par Location pour chaque variable\n")
+        print("\n Taux de valeurs nulles par Location pour chaque variable\n")
         print (df_nb_na.iloc[:,1:])
         
-        sns.heatmap(df_nb_na.iloc[:,1:], cmap='gnuplot2_r', annot=True, fmt="d")
-        axes.set_title("Nb d'enregistrements nuls par Location", fontsize=18)
+        sns.heatmap(df_nb_na.iloc[:,1:-1], cmap='gnuplot2_r', annot=True, fmt=".1f")
+        axes.set_title("Taux de valeurs nulles pour chaque couple Location/variable", fontsize=18)
         plt.show();
         
     # --------------------------------------------
@@ -389,14 +422,14 @@ class ProjetAustralie:
     def analyse_temporelle_autocorr(self, colonne: str):
         from statsmodels.graphics.tsaplots import plot_pacf, plot_acf
         from pandas.plotting import autocorrelation_plot
-        plt.figure(figsize=(24,12))
+        plt.figure(figsize=(240,12))
         
-        autocorrelation_plot(pa.df_resample[colonne].resample('D').mean().diff(1).dropna(), label=colonne)
+        autocorrelation_plot(pa.df_resample.loc[pa.df_resample.Location=="Perth"][colonne].resample('D').mean().diff(1).dropna(), label=colonne)
         plt.show();
         
-        fig, ax = plt.subplots(2,1,figsize=(24,12))
-        plot_acf(pa.df_resample[colonne].resample('D').mean().diff(1).dropna(), lags = 1200, ax=ax[0])
-        plot_pacf(pa.df_resample[colonne].resample('D').mean().diff(1).dropna(), lags = 1200, ax=ax[1])
+        fig, ax = plt.subplots(2,1,figsize=(240,12))
+        plot_acf(pa.df_resample.loc[pa.df_resample.Location=="Perth"][colonne].resample('D').mean().diff(1).dropna(), lags = 1200, ax=ax[0])
+        plot_pacf(pa.df_resample.loc[pa.df_resample.Location=="Perth"][colonne].resample('D').mean().diff(1).dropna(), lags = 1200, ax=ax[1])
         plt.show();
     
     # trace l'histogramme des precipitation et courbe des temperatures pour l'australie et pour chaque Location
@@ -521,7 +554,7 @@ class ProjetAustralie:
     # KNN imputer - (sur une seule ville pour le moment: 40mn pour lancer avec knn=1 sur tout le dataset!)
     def gestion_na_knni(self):
         
-        knni = KNNImputer(n_neighbors=1)
+        knni = KNNImputer(n_neighbors=3)
         
         coln = self.df_resample.select_dtypes(include=['number']).columns
         print ("coln : ", coln)
@@ -536,7 +569,7 @@ class ProjetAustralie:
         fig, ax = plt.subplots(2,1, figsize=(18,12))
         ax[0].plot(self.df_resample.loc[pa.df_resample.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données d\'origine")
         ax[0].legend()
-        ax[1].plot(self.df_resample_nona.loc[pa.df_resample_nona.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données extrapolées avec KNN Imputer")
+        ax[1].plot(self.df_resample_nona.loc[pa.df_resample_nona.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données extrapolées avec KNN Imputer à partir de Melbourne uniquement")
         ax[1].legend()
     
     # -----------------------------
@@ -622,6 +655,9 @@ class ProjetAustralie:
 
         #self.charge_villes()
         self.df_moyenne = self.df_moyenne.reset_index()
+        self.df_moyenne["Climat"] = clf.labels_[self.df_moyenne.index]
+        
+        self.df_climat = self.df_moyenne[["Location", "Climat"]]
         
         fig = px.scatter_mapbox(self.df_moyenne, lat='lat', lon='lng', hover_name='Location', color=clf.labels_, text='Location', labels='Location', size_max=15, size='RainTomorrow', color_continuous_scale=px.colors.qualitative.Plotly).update_traces(marker=dict(size=10))
         fig.update_layout(mapbox_style='open-street-map')
