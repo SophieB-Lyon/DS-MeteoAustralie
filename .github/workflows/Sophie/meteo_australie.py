@@ -69,8 +69,8 @@ class ProjetAustralie:
         self.matrice_corr_quyen(self.df.select_dtypes(include=['float64']))
 
         # determine les climats
-        #self.clusterisation_groupee()
-        #self.df = self.df.merge(self.df_climat, on="Location")      
+        self.clusterisation_groupee()
+        self.df = self.df.merge(self.df_climat, on="Location")      
 
         print ("Nb Locc", self.df.Location.nunique())
         
@@ -91,8 +91,8 @@ class ProjetAustralie:
         print ("Nb Loc e", self.df.Location.nunique())
 
         # determine les climats
-        self.clusterisation_groupee()
-        self.df = self.df.merge(self.df_climat, on="Location")      
+        #self.clusterisation_groupee()
+        #self.df = self.df.merge(self.df_climat, on="Location")      
         
         # gestion des variables sur le vent
         #self.df= pd.get_dummies(self.df)
@@ -604,16 +604,27 @@ class ProjetAustralie:
     def gestion_na_knni(self):
         # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
         if not hasattr(self, "df_resample"):
-            self.reindexation_temporelle()
+            self.reindexation_temporelle()       
         
         knni = KNNImputer(n_neighbors=3)
         
         coln = self.df_resample.select_dtypes(include=['number']).columns.drop("NbTotNA")
         print ("coln : ", coln)
 
+        # determine les climats
+        self.clusterisation_groupee()
+        
+        index_resample = self.df_resample.index
+        self.df_resample = self.df_resample.merge(self.df_climat, on="Location")      
+        
+        print ("shapes", self.df_resample.shape, index_resample.shape)
+        self.df_resample.index = index_resample
+        
+
         # selection de la plage pour le knni
         self.df_resample_nona = self.df_resample.copy()       
         #self.df_resample_nona = self.df_resample_nona[self.df_resample_nona.Location=="Melbourne"]        
+        self.df_resample_nona = self.df_resample_nona[self.df_resample_nona.Climat==self.df_resample_nona[self.df_resample_nona.Location=="Melbourne"].iloc[0,-1]]
 
         # normalisation pour knni
         col_normalization = coln.drop(['RainToday', 'RainTomorrow'])
@@ -635,7 +646,7 @@ class ProjetAustralie:
         fig, ax = plt.subplots(2,1, figsize=(18,12))
         ax[0].plot(self.df_resample.loc[pa.df_resample.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données d\'origine")
         ax[0].legend()
-        ax[1].plot(self.df_resample_nona.loc[pa.df_resample_nona.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données extrapolées avec KNN Imputer à partir du dataset complet") #"e Melbourne uniquement")
+        ax[1].plot(self.df_resample_nona.loc[pa.df_resample_nona.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données extrapolées avec KNN Imputer à partir des villes de la même zone climatique") #"e Melbourne uniquement")
         ax[1].legend();
 
     
@@ -716,7 +727,7 @@ class ProjetAustralie:
         plt.show()
 
         # 7 clusters (pas optimal, juste pour voir)        
-        clf = AgglomerativeClustering(n_clusters=8)
+        clf = AgglomerativeClustering(n_clusters=7)
         clf.fit(self.df_moyenne.iloc[:,:-2])
         self.clust_lab = clf.labels_
 
