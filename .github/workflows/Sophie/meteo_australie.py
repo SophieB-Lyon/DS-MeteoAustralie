@@ -15,7 +15,7 @@ from sklearn.model_selection import train_test_split
 from sklearn import preprocessing
 from sklearn.preprocessing import MinMaxScaler
 from sklearn.impute import KNNImputer
-
+import time
 
 class ProjetAustralie:
     
@@ -50,7 +50,7 @@ class ProjetAustralie:
         # retrait des 4 variables avec trop de nuls
         self.df = self.df.drop(columns=["Sunshine", "Evaporation", "Cloud9am", "Cloud3pm"])
 #        self.df = self.df.drop(columns=["Evaporation", "Cloud9am", "Cloud3pm"])
-        
+
         # retrait "bourrin" des NA (à affiner plus tard)
         self.df = self.df.dropna()
 
@@ -68,9 +68,20 @@ class ProjetAustralie:
         # matrice avant
         self.matrice_corr_quyen(self.df.select_dtypes(include=['float64']))
 
+        #self.df= pd.get_dummies(self.df)
+        # gestion des variables sur le vent
+        self.remplace_direction_vent()
+
         # determine les climats
-        self.clusterisation_groupee()
+        self.clusterisation_groupee()      
+      
+        # ajoute des variables cibles sur les prochains jours
+        self.ajoute_variables_cibles()
+
+        # ajoute le climat dans le df final
         self.df = self.df.merge(self.df_climat, on="Location")      
+        self.df.index = self.df.Date
+
 
         print ("Nb Locc", self.df.Location.nunique())
         
@@ -79,7 +90,7 @@ class ProjetAustralie:
         
         # suppression des variable très fortement correlées et de celles trop manquantes
         #self.df = self.df.drop(columns=["MinTemp", "Temp9am", "Temp3pm", "Pressure3pm"])
-        self.df = self.df.drop(columns=["Sunshine", "Evaporation", "Cloud9am", "Cloud3pm"])
+        #self.df = self.df.drop(columns=["Sunshine", "Evaporation", "Cloud9am", "Cloud3pm"])
         
         # supprime la date (dispo en index)
         self.df = self.df.drop(columns="Date")
@@ -92,11 +103,7 @@ class ProjetAustralie:
 
         # determine les climats
         #self.clusterisation_groupee()
-        #self.df = self.df.merge(self.df_climat, on="Location")      
-        
-        # gestion des variables sur le vent
-        #self.df= pd.get_dummies(self.df)
-        self.remplace_direction_vent()
+        #self.df = self.df.merge(self.df_climat, on="Location")             
         
         print ("Nb Loc f", self.df.Location.nunique())
         
@@ -107,23 +114,69 @@ class ProjetAustralie:
         print ("Nb Loc g", self.df.Location.nunique())
 
 
+        # enleve les lignes avec + de 50% de NA
+        self.df = self.df.dropna(thresh=len(self.df.columns)*.5, axis=0)
+
+        print ("Nb Loc g2", self.df.Location.nunique())
+
+        # enleve les lignes dont la variable cible est NA
+        # je commente vu que la variable cible va bouger en realite
+        # !!! supprimer la colonne de la valeur cible => il faudra un jeu de fichier different par cible !!!
+        self.df = self.df.dropna(subset=['RainTomorrow'], axis=0)
+
+        # knn imputation sur les data NA restantes
+        self.gestion_na_knni_v2()
+
+
+        # !!!! faire knn imputation à ce niveau !!!!
+
         # retrait "bourrin" des NA (à affiner plus tard)
-        self.df = self.df.dropna()
+#        self.df = self.df.dropna()
                 
         print ("Nb Loc h", self.df.Location.nunique())
         
         
         # supprime le nom de la ville, puisqu'on a ses coordonnées => pas de dummies sur le nom de la ville
-        self.df = self.df.drop(columns="Location")              
+        # non, on la garde à ce stade, quitte à la dropper ensuite quand on creera les variables sources
+        #self.df = self.df.drop(columns="Location")
         
         # affiche matrice de correlation apres
 #        self.matrice_corr_quyen(self.df.drop(columns="Climat"))
         
-#        for clim in np.arange(self.df.Climat.nunique()):
-#            self.matrice_corr_quyen(self.df[self.df.Climat==clim].drop(columns="Climat"), "Corrélations climat n° "+str(clim))
+        #for clim in np.arange(self.df.Climat.nunique()):
+        #    self.matrice_corr_quyen(self.df[self.df.Climat==clim].drop(columns="Climat"), "Corrélations climat n° "+str(clim))
         
         # indique qu'on a deja fait cette etape
-        self.is_preprocessing_apres_analyse=True
+        #self.is_preprocessing_apres_analyse=True
+    
+    # cree d'autres variables cibles de J+1, J+2, J+3
+    def ajoute_variables_cibles(self):
+        # obligatoire sinon le shift n'aura pas de sens puisqu'on risquera 
+        if not hasattr(self, "df_resample"):
+            self.reindexation_temporelle()           
+            self.df = self.df_resample
+
+        # cree les nouvelles colonnes
+        for i in np.arange(1,15):
+            self.df[f"Rain_J_{i:02d}"] = None
+            self.df[f"MaxTemp_J_{i:02d}"] = None
+        
+        # il faut appliquer cet ajout pour chaque location independemment, et non sur l'ensemble puisque chaque date est commune pour chaque location, et non consecutives
+        for location in self.df.Location.unique():
+            self._ajoute_variables_cibles_location(location)
+
+            
+    # ajoute les infos pour une location donnée
+    def _ajoute_variables_cibles_location(self, location:str):
+        df_location = self.df[self.df.Location==location]
+        
+        # pluie et maxtemp
+        for i in np.arange(1,15):
+            df_location[f"Rain_J_{i:02d}"] = df_location.RainToday.shift(-i)
+            df_location[f"MaxTemp_J_{i:02d}"] = df_location.MaxTemp.shift(-i)
+        
+        # on reecrit dans le df d'origine
+        self.df[self.df.Location==location] = df_location
     
     # affiche matrice corr comme Quyen
     def matrice_corr_quyen(self, df, titre:str="Corrélations entre variables après ajout des nouvelles variables"):
@@ -143,9 +196,17 @@ class ProjetAustralie:
         
     # remplace les variables categorielles de direction de vent par les composantes x et y
     def remplace_direction_vent(self):
+        # si deja substitué: on sort
+        if hasattr(self.df, "WindGustDir_X"):
+            return
+        
+        print (self.df.columns)
         self._remplace_direction_vent("WindGustDir", "WindGustSpeed")
+        print (self.df.columns)
         self._remplace_direction_vent("WindDir3pm", "WindSpeed3pm")
+        print (self.df.columns)
         self._remplace_direction_vent("WindDir9am", "WindSpeed9am")       
+        print (self.df.columns)
     
     # remplace une colonne categorielle de direction de vent par deux colonnes numeriques
     def _remplace_direction_vent(self, nom_colonne_dir: str, nom_colonne_speed: str):
@@ -159,10 +220,15 @@ class ProjetAustralie:
         df_direction["sin"]=np.sin(df_direction.rad)
         df_direction["cos"]=np.cos(df_direction.rad)
         
+        df_direction.loc[len(df_direction)]=[None, 0, 0, 0]
+        
         self.df_dir_vent = df_direction
         
         # jointure pour deduire les cos et sin multipliés par la vitesse
         df_temp = self.df.merge(df_direction, left_on=nom_colonne_dir, right_on="dir")
+        df_temp.index = df_temp.Date
+        df_temp = df_temp.sort_index()
+        
         df_temp[nom_colonne_dir+"_X"]=df_temp.cos*df_temp[nom_colonne_speed]
         df_temp[nom_colonne_dir+"_Y"]=df_temp.sin*df_temp[nom_colonne_speed]
         df_temp[nom_colonne_dir+"_RAD"]=df_temp["rad"]  # on garde rad pour les graphes
@@ -177,6 +243,7 @@ class ProjetAustralie:
         # sinon, on charge les props des villes et on les ajoute au df
         self.charge_villes()
         self.df = pd.merge(self.df, self.df_cities, on='Location')
+        self.df.index = self.df.Date
                 
     # remplace RainTomorrow par 'Rain+j', qui indique s'il pleuvra j jours plus tard
     # !! non fonctionnelle encore !!
@@ -319,8 +386,8 @@ class ProjetAustralie:
     
     # reindexe les dates pour qu'il n'y ait aucun trou
     def reindexation_temporelle(self):
-        date_min = self.df.index.min()
-        date_max = self.df.index.max()
+        date_min = self.df.Date.min()
+        date_max = self.df.Date.max()
         print ("Plage de date: du ", date_min, "au ", date_max)
         print (date_max-date_min)
         
@@ -335,7 +402,7 @@ class ProjetAustralie:
             df_l = self._reindexation_temporelle_location(location, date_range)
             df_dates = pd.concat([df_dates, df_l], axis=0)
             
-        df_dates['NbTotNA'] = df_dates.iloc[:,1:].isna().sum(axis=1)
+        #df_dates['NbTotNA'] = df_dates.iloc[:,1:].isna().sum(axis=1)
         self.df_resample = df_dates
         
     # renvoie un df de la location reechantilloné sur une plage de date passée en argument
@@ -343,6 +410,7 @@ class ProjetAustralie:
         df_l = self.df[self.df.Location==location]
         df_l_c = pd.concat([date_range, df_l], axis=1)
         df_l_c.Location = location # nécessaire car les nouvelles dates entrainent une location nulle
+        df_l_c.Date = df_l_c.index
         return df_l_c
         
     # comparaison des NA à partir du DF d'origine et celui resamplé
@@ -608,7 +676,7 @@ class ProjetAustralie:
         
         knni = KNNImputer(n_neighbors=3)
         
-        coln = self.df_resample.select_dtypes(include=['number']).columns.drop("NbTotNA")
+        coln = self.df_resample.select_dtypes(include=['number']).columns#.drop("NbTotNA")
         print ("coln : ", coln)
 
         # determine les climats
@@ -618,8 +686,10 @@ class ProjetAustralie:
         self.df_resample = self.df_resample.merge(self.df_climat, on="Location")      
         
         print ("shapes", self.df_resample.shape, index_resample.shape)
-        self.df_resample.index = index_resample
+        self.df_resample.index = self.df_resample.Date
         
+        # --- debut du knni
+        # iterer sur chaque sous ensemble
 
         # selection de la plage pour le knni
         self.df_resample_nona = self.df_resample.copy()       
@@ -637,6 +707,8 @@ class ProjetAustralie:
         # denormalisation pour retour aux ordres de grandeurs initiaux
         self.df_resample_nona[col_normalization] = scaler.inverse_transform(self.df_resample_nona[col_normalization])
         
+        # --- fin du knni
+        
         fig, ax = plt.subplots(2,1, figsize=(90,12))
         ax[0].plot(self.df_resample.loc[pa.df_resample.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données d\'origine")
         ax[0].legend()
@@ -649,6 +721,104 @@ class ProjetAustralie:
         ax[1].plot(self.df_resample_nona.loc[pa.df_resample_nona.Location=="Melbourne","MaxTemp"], label="MaxTemp de Melbourne - Données extrapolées avec KNN Imputer à partir des villes de la même zone climatique") #"e Melbourne uniquement")
         ax[1].legend();
 
+
+    # KNN imputer - (sur une seule ville pour le moment: 40mn pour lancer avec knn=1 sur tout le dataset!)
+    def gestion_na_knni_v2(self):
+        # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
+        if not hasattr(self, "df_resample"):
+            self.reindexation_temporelle()       
+            self.df = self.df_resample
+                
+        coln = self.df.select_dtypes(include=['number']).columns#.drop("NbTotNA")
+        print ("coln : ", coln)
+
+        # determine les climats
+        if not hasattr(self.df, "Climat"):
+            self.clusterisation_groupee()
+        
+            index_resample = self.df.index
+            self.df = self.df.merge(self.df_climat, on="Location")      # commente car desormais, le climat est ajouté avant
+            
+            print ("shapes", self.df.shape, index_resample.shape)
+            self.df.index = self.df.Date
+        
+        # --- debut du knni
+        # iterer sur chaque sous ensemble
+        
+        for climat in self.df.Climat.unique():
+            self._gestion_na_knni_data(climat, coln)
+        #self._gestion_na_knni_data(3, coln)
+
+    # KNN imputation
+    def _gestion_na_knni_data(self, climat:str, coln:pd.Series):
+        
+        print (time.ctime())
+        print (f"KNNI sur climat n°{climat}\n")        
+        
+        knni = KNNImputer(n_neighbors=3)
+
+        if self.df[self.df.Climat==climat].Location.nunique()==1:
+            return
+
+        # selection de la plage pour le knni
+        df_resample_nona = self.df.copy()       
+        #df_resample_nona = df_resample_nona[df_resample_nona.Location==location]        
+        #df_resample_nona = df_resample_nona[df_resample_nona.Climat==df_resample_nona[df_resample_nona.Location==location].iloc[0,-1]]
+        df_resample_nona = df_resample_nona[df_resample_nona.Climat==climat]
+
+        # normalisation pour knni
+        # supprime les variables cibles et/ou binaires (RainToday)
+        col_normalization = coln.drop(['RainToday', 'RainTomorrow'])
+        col_normalization = col_normalization[~col_normalization.str.startswith("Rain_J_")]
+        col_normalization = col_normalization[~col_normalization.str.startswith("MaxTemp_J_")]
+        
+        coln = col_normalization
+        
+        
+        scaler = preprocessing.StandardScaler().fit(self.df[col_normalization])
+        df_resample_nona[col_normalization] = scaler.transform(df_resample_nona[col_normalization])
+        
+        # knni in progress!
+        df_resample_nona[coln] = pd.DataFrame(knni.fit_transform(df_resample_nona[coln]), columns=coln, index=df_resample_nona.index)
+        
+        # denormalisation pour retour aux ordres de grandeurs initiaux
+        df_resample_nona[col_normalization] = scaler.inverse_transform(df_resample_nona[col_normalization])
+        
+        # --- fin du knni
+
+        location = self.df[self.df.Climat==climat].Location.unique()[0]
+
+        fig, ax = plt.subplots(2,1, figsize=(18,12))
+        ax[0].plot(self.df.loc[self.df.Location==location,"MaxTemp"].sort_index(), label=f"MaxTemp de {location} - Données d\'origine")
+        ax[0].legend()
+        ax[1].plot(df_resample_nona.loc[df_resample_nona.Location==location,"MaxTemp"].sort_index(), label="MaxTemp de Melbourne - Données extrapolées avec KNN Imputer à partir du dataset complet") #"e Melbourne uniquement")
+        ax[1].legend();
+
+        """        
+        fig, ax = plt.subplots(2,1, figsize=(18,12))
+        ax[0].plot(self.df.loc[self.df.Location==location,"MaxTemp"].sort_index(), label=f"MaxTemp de {location} - Données d\'origine")
+        ax[0].legend()
+        ax[1].plot(df_resample_nona.loc[df_resample_nona.Location==location,"MaxTemp"].sort_index(), label=f"MaxTemp de {location} - Données extrapolées avec KNN Imputer à partir des villes de la même zone climatique") #"e Melbourne uniquement")
+        ax[1].legend();
+"""
+        #♠ recopie dans self.df
+        
+        self.df[self.df.Climat==climat] = df_resample_nona
+
+        
+        """
+        fig, ax = plt.subplots(2,1, figsize=(90,12))
+        ax[0].plot(self.df.loc[self.df.Climat==climat,"MaxTemp"], label=f"MaxTemp de {climat} - Données d\'origine")
+        ax[0].legend()
+        ax[1].plot(df_resample_nona.loc[df_resample_nona.Climat==climat,"MaxTemp"], label="MaxTemp de Melbourne - Données extrapolées avec KNN Imputer à partir du dataset complet") #"e Melbourne uniquement")
+        ax[1].legend();
+        
+        fig, ax = plt.subplots(2,1, figsize=(18,12))
+        ax[0].plot(self.df.loc[self.df.Climat==climat,"MaxTemp"], label="MaxTemp de Melbourne - Données d\'origine")
+        ax[0].legend()
+        ax[1].plot(df_resample_nona.loc[df_resample_nona.Climat==climat,"MaxTemp"], label=f"MaxTemp de {climat} - Données extrapolées avec KNN Imputer à partir des villes de la même zone climatique") #"e Melbourne uniquement")
+        ax[1].legend();
+        """
     
     # -----------------------------
     # calcule la correlation avec chaque variable qualitative du vent
@@ -691,20 +861,6 @@ class ProjetAustralie:
     # -----------------------------
     # -----------------------------
     
-    # in progress: j'aimerais tenter d'arriver à clusteriser automatiquement les villes
-    def clusterisation_temporelle(self):
-        # tentative de determination de climats similaires dans certaines villes
-        from sklearn.cluster import KMeans
-        
-        df_cluster = self.df.dropna(how='any')
-        df_cluster_f = df_cluster.select_dtypes(include=['float64'])
-        
-        df_cluster['Location_ID'] = df_cluster.groupby('Location').ngroup()
-        kmeans = KMeans(n_clusters=2)
-        kmeans.fit(df_cluster_f, sample_weight=df_cluster['Location_ID'])
-        df_cluster['ClusterLocation'] = kmeans.labels_
-        print(df_cluster[['Location', 'ClusterLocation']])
-
     # clusterisation des villes en 7 zones climatiques, basées sur la moyenne des variables sur les 10 ans de relevés
     def clusterisation_groupee(self):
         from sklearn.cluster import AgglomerativeClustering, MeanShift, estimate_bandwidth
@@ -712,24 +868,72 @@ class ProjetAustralie:
 
         self._ajoute_prop_locations()
 
-        self.df_moyenne = self.df.groupby("Location").agg("mean")
+        self.remplace_direction_vent() # besoin de supprimer les variables categorielles
+                       
+        self.df_moyenne = self.df.groupby("Location").agg(["mean", "std"])
+        self.df_moyenne.columns = ['{}_{}'.format(col[0], col[1]) for col in self.df_moyenne.columns]
+        
         self.df_moyenne = self.df_moyenne.dropna(axis=1)
 
         # sur la suite, la normalisation et la clusterization ne se font pas sur les deux dernières colonnes,
         # c'est à dire les coordonnées geographiques, pour que celles-ci n'influence pas l'appartenance à un cluster
+        # enleve egalement la premiere colonne, cad la date
         scaler=MinMaxScaler()
-        pa.df_moyenne.iloc[:,:-2] = scaler.fit_transform(pa.df_moyenne.iloc[:,:-2])        
+        
+        mask_df_moyenne = self.df_moyenne.columns.drop(["lat_mean", "lng_mean", "Date_mean", 
+                                                        "lat_std", "lng_std", "Date_std"])
+                                                        #])
 
-        Z = linkage(self.df_moyenne.iloc[:,:-2], method='ward', metric = 'euclidean')
+        mask_df_moyenne = mask_df_moyenne.drop(['WindSpeed9am_mean', 'WindSpeed9am_std', 
+                                                'WindSpeed3pm_mean', 'WindSpeed3pm_std', 
+                                                'WindGustDir_RAD_mean', 'WindGustDir_RAD_std', 
+                                                'WindDir3pm_X_mean', 'WindDir3pm_X_std', 
+                                                'WindDir3pm_Y_mean', 'WindDir3pm_Y_std', 
+                                                'WindDir3pm_RAD_mean', 'WindDir3pm_RAD_std', 
+                                                'WindDir9am_X_mean', 'WindDir9am_X_std', 
+                                                'WindDir9am_Y_mean', 'WindDir9am_Y_std', 
+                                                'WindDir9am_RAD_mean', 'WindDir9am_RAD_std'])
+
+        """
+        mask_df_moyenne = mask_df_moyenne.drop(['WindSpeed9am_mean', 
+                                                'WindSpeed3pm_mean', 
+                                                'WindGustDir_RAD_mean', 
+                                                'WindDir3pm_X_mean', 
+                                                'WindDir3pm_Y_mean',
+                                                'WindDir3pm_RAD_mean', 
+                                                'WindDir9am_X_mean', 
+                                                'WindDir9am_Y_mean', 
+                                                'WindDir9am_RAD_mean'])
+
+        """        
+        """
+        # retrait des variables bo-quotidiennes
+        mask_df_moyenne = mask_df_moyenne.drop(['Temp9am_mean', 'Temp9am_std', 
+                                                'Temp3pm_mean', 'Temp3pm_std', 
+                                                'Humidity9am_mean', 'Humidity9am_std'
+                                                ])
+        """
+        # retrait de raintomorrow, qui ne concerne pas le relevé météo du jour
+        mask_df_moyenne = mask_df_moyenne.drop(['RainTomorrow_mean', 'RainTomorrow_std'
+                                                #'RainToday_mean', 'RainToday_std'
+                                                ])
+
+        
+        
+        print ("Variables utilsées pour la clusterisation:", mask_df_moyenne,"\n")
+        
+        self.df_moyenne[mask_df_moyenne] = scaler.fit_transform(self.df_moyenne[mask_df_moyenne])        
+
+        Z = linkage(self.df_moyenne[mask_df_moyenne], method='ward', metric = 'euclidean')
         
         plt.figure(figsize=(12,8))
-        dendrogram(Z, labels=self.df_moyenne.index, leaf_rotation=90., color_threshold=1.25)
+        dendrogram(Z, labels=self.df_moyenne.index, leaf_rotation=90., color_threshold=1.75)
         plt.show()
 
         # 7 clusters (pas optimal, juste pour voir)        
         clf = AgglomerativeClustering(n_clusters=7)
-        clf.fit(self.df_moyenne.iloc[:,:-2])
-        self.clust_lab = clf.labels_
+        clf.fit(self.df_moyenne[mask_df_moyenne])
+        clust_lab = clf.labels_.astype(str)
 
         #self.charge_villes()
         self.df_moyenne = self.df_moyenne.reset_index()
@@ -737,7 +941,20 @@ class ProjetAustralie:
         
         self.df_climat = self.df_moyenne[["Location", "Climat"]]
         
-        fig = px.scatter_mapbox(self.df_moyenne, lat='lat', lon='lng', hover_name='Location', color=clf.labels_, text='Location', labels=clf.labels_, size_max=50, color_continuous_scale=px.colors.qualitative.Plotly).update_traces(marker=dict(size=30))
+        fig = px.scatter_mapbox(self.df_moyenne, 
+                                lat='lat_mean', 
+                                lon='lng_mean', 
+                                hover_name='Location', 
+                                color=clust_lab, 
+                                #text='Location', 
+                                labels=clf.labels_, 
+                                size_max=30, 
+                                opacity=.8,
+                                #color_continuous_scale=px.colors.qualitative.Plotly
+                                color_discrete_sequence=px.colors.qualitative.Set1
+                                #color_discrete_sequence=px.colors.qualitative.T10
+                                ).update_traces(marker=dict(size=30))
+        
         fig.update_layout(mapbox_style='open-street-map')
         fig.show(renderer='browser')      
    
@@ -838,7 +1055,10 @@ class ProjetAustralie:
 
 pa = ProjetAustralie()
 
+#pa.gestion_na_knni_v2()
+
+#pa.reindexation_temporelle()
 #pa.analyse_donnees()
-#pa.preprocessing_apres_analyse()
+pa.preprocessing_apres_analyse()
 #pa.carte_australie()
 #pa.synthetise_villes()
