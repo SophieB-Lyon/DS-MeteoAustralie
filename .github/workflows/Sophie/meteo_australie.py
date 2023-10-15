@@ -58,7 +58,8 @@ class ProjetAustralie:
         self.is_preprocessing_apres_analyse=True
 
         
-    def preprocessing_apres_analyse(self):
+    # si pour_serie_temporelle est True, alors on ne supprime aucune date, donc jamais de dropna
+    def preprocessing_apres_analyse(self, pour_serie_temporelle:bool=False):
         # si deja fait, on sort
         if self.is_preprocessing_apres_analyse:
             return
@@ -113,16 +114,19 @@ class ProjetAustralie:
         
         print ("Nb Loc g", self.df.Location.nunique())
 
+        # ajoute une variable marquant la saisonnalité
+        self.df["SaisonCos"] = -np.cos(4*np.pi*(self.df.index.day_of_year-1)/365)
 
         # enleve les lignes avec + de 50% de NA
-        self.df = self.df.dropna(thresh=len(self.df.columns)*.5, axis=0)
+        if not pour_serie_temporelle:
+            self.df = self.df.dropna(thresh=len(self.df.columns)*.5, axis=0)
 
         print ("Nb Loc g2", self.df.Location.nunique())
 
         # enleve les lignes dont la variable cible est NA
         # je commente vu que la variable cible va bouger en realite
         # !!! supprimer la colonne de la valeur cible => il faudra un jeu de fichier different par cible !!!
-        self.df = self.df.dropna(subset=['RainTomorrow'], axis=0)
+        #self.df = self.df.dropna(subset=['RainTomorrow'], axis=0)
 
         # knn imputation sur les data NA restantes
         self.gestion_na_knni_v2()
@@ -157,23 +161,26 @@ class ProjetAustralie:
             self.df = self.df_resample
 
         # cree les nouvelles colonnes
-        for i in np.arange(1,15):
+        nb_j_max = 365 # nb de jours ajoutes en variable cible
+        for i in np.arange(1,nb_j_max):
             self.df[f"Rain_J_{i:02d}"] = None
             self.df[f"MaxTemp_J_{i:02d}"] = None
+            self.df[f"Rainfall_J_{i:02d}"] = None
         
         # il faut appliquer cet ajout pour chaque location independemment, et non sur l'ensemble puisque chaque date est commune pour chaque location, et non consecutives
         for location in self.df.Location.unique():
-            self._ajoute_variables_cibles_location(location)
+            self._ajoute_variables_cibles_location(location, nb_j_max)
 
             
     # ajoute les infos pour une location donnée
-    def _ajoute_variables_cibles_location(self, location:str):
+    def _ajoute_variables_cibles_location(self, location:str, nb_j_max:int):
         df_location = self.df[self.df.Location==location]
         
-        # pluie et maxtemp
-        for i in np.arange(1,15):
+        # pluie , maxtemp et rainfall
+        for i in np.arange(1,nb_j_max):
             df_location[f"Rain_J_{i:02d}"] = df_location.RainToday.shift(-i)
             df_location[f"MaxTemp_J_{i:02d}"] = df_location.MaxTemp.shift(-i)
+            df_location[f"Rainfall_J_{i:02d}"] = df_location.Rainfall.shift(-i)
         
         # on reecrit dans le df d'origine
         self.df[self.df.Location==location] = df_location
@@ -331,6 +338,25 @@ class ProjetAustralie:
         axes.set_title("Taux de valeurs nulles pour chaque couple Location/variable", fontsize=18)
         plt.show();
         
+    # affiche le nb de jours renseignes par mois pour chaque Location
+    def nbj_par_Location(self):
+        
+        self.df = pd.read_csv("data_for_timeseries_v1.csv", index_col=0)
+        #self.df = pd.read_csv("weatherAUS.csv", index_col=0)
+                
+        self.df.index = pd.to_datetime(self.df.index)
+        
+        pt = self.df
+        pt["mois"] = pt.index.strftime('%Y-%m')
+        #tab_pt = pt.pivot_table(index='mois', columns='Location', aggfunc='size')        
+        tab_pt = pt.pivot_table(index='mois', columns='Location', values='RainToday', aggfunc=lambda x: x.isna().sum())
+        
+        fig, ax = plt.subplots(figsize=(24,24))
+        sns.heatmap(tab_pt,
+            annot=True,
+            ax=ax)
+
+    
     # --------------------------------------------
     # affiche les graphes representant les NA et les moyennes en fonction du temps, pour chaque colonne numerique
     def analyse_variables_temps(self):
@@ -771,6 +797,7 @@ class ProjetAustralie:
         col_normalization = coln.drop(['RainToday', 'RainTomorrow'])
         col_normalization = col_normalization[~col_normalization.str.startswith("Rain_J_")]
         col_normalization = col_normalization[~col_normalization.str.startswith("MaxTemp_J_")]
+        col_normalization = col_normalization[~col_normalization.str.startswith("Rainfall_J_")]
         
         coln = col_normalization
         
@@ -941,11 +968,11 @@ class ProjetAustralie:
         
         self.df_climat = self.df_moyenne[["Location", "Climat"]]
         
-        fig = px.scatter_mapbox(self.df_moyenne, 
+        fig = px.scatter_mapbox(self.df_moyenne.sort_values(by="Climat"), 
                                 lat='lat_mean', 
                                 lon='lng_mean', 
                                 hover_name='Location', 
-                                color=clust_lab, 
+                                color=np.sort(clust_lab), 
                                 #text='Location', 
                                 labels=clf.labels_, 
                                 size_max=30, 
@@ -1059,6 +1086,8 @@ pa = ProjetAustralie()
 
 #pa.reindexation_temporelle()
 #pa.analyse_donnees()
-pa.preprocessing_apres_analyse()
+
+#Zpa.preprocessing_apres_analyse(pour_serie_temporelle=True)
+
 #pa.carte_australie()
 #pa.synthetise_villes()
