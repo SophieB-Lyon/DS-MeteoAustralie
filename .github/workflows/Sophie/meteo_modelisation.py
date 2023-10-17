@@ -55,6 +55,10 @@ import plotly.colors as pc
 # divers
 from tqdm import tqdm
 
+# explicativité
+import shap
+
+
 #warnings.filterwarnings("ignore", message="is_sparse is deprecated")
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -106,6 +110,10 @@ class ProjetAustralieModelisation:
         # on supprime la Location si elle est presente en str (utile uniquement pour filtrer en amont)
         if hasattr(self.Xy, "Location"):
             self.Xy = self.Xy.drop(columns="Location")
+        
+        # eclate les climats (variable categorielle!)
+        self.Xy = pd.get_dummies(self.Xy, columns=['Climat'])
+        
         
         # supprime les autres colonnes donnant trop d'indices
         if cible=="RainToday":
@@ -495,6 +503,62 @@ class ProjetAustralieModelisation:
         #plt.ylim(.45,1)
         #plt.axhline(y=0.5, color='gray', linestyle='dashed')
         plt.show();              
+        
+        
+    def trace_shap(self):
+        # =============================================================================================
+        # SHAP - waterfall
+        # =============================================================================================
+        shap_explainer = shap.TreeExplainer(self.clf, feature_names=pm.X.columns)
+        shap_values = shap_explainer(self.X_test)
+        #shap_df = pd.DataFrame(shap_values.values, columns=self.X.columns)
+               
+        s = 0
+        for s in range(5):
+            plt.figure()
+            shap.plots.waterfall(shap_values[s], max_display=20, show=False)
+            plt.tight_layout()
+        plt.show();
+        
+#            file_out = f'{path_output}/waterfall_sample_{s}.png'
+#            plt.savefig(file_out)
+        
+        # =============================================================================================
+        # SHAP - Mean SHAP Plot
+        # =============================================================================================
+        
+        plt.figure()
+        shap.plots.bar(shap_values, max_display=20, show=False)
+        plt.tight_layout()
+#        file_out = f'{path_output}/mean_SHAP_barplot.png'
+#        plt.savefig(file_out)
+        
+        # =============================================================================================
+        # SHAP - Beeswarm Plot
+        # =============================================================================================
+        
+        plt.figure()
+        shap.plots.beeswarm(shap_values, max_display=20, show=False)
+        plt.tight_layout()
+#        file_out = f'{path_output}/beeswarm.png'
+#        plt.savefig(file_out)
+        plt.show();
+        # =============================================================================================
+        # SHAP - Dependence Plots
+        # =============================================================================================
+        
+        list_variables = ["Humidity3pm", "Pressure3pm", "WindGustSpeed", "Sunshine", "RainToday", "Rainfall", "MaxTemp", 
+                          "AmplitudeTemp", "SaisonCos", "Climat_0", "Climat_1", "Climat_2", "Climat_3", "Climat_4", "Climat_6",
+                          "WindGustDir_X", "WindGustDir_Y"
+                          ]
+#        for variable in list_variables:
+        for variable in self.X.columns:    
+            plt.figure()
+            shap.plots.scatter(shap_values[:, variable], show=False)
+            plt.tight_layout()
+#            file_out = f'{path_output}/dependence_{variable}.png'
+#            plt.savefig(file_out)
+        plt.show();
         
     # ---- series temporelles
     
