@@ -28,7 +28,7 @@ from sklearn.metrics import roc_curve, auc
 from sklearn.metrics import f1_score, accuracy_score, recall_score, precision_score
 
 # metrics
-from sklearn.metrics import make_scorer
+from sklearn.metrics import make_scorer, classification_report, confusion_matrix
 from imblearn.metrics import classification_report_imbalanced
 from sklearn.metrics import mean_squared_error, mean_absolute_error
 
@@ -41,6 +41,10 @@ from sklearn.neural_network import MLPClassifier
 from sklearn.dummy import DummyClassifier
 import xgboost as xgb
 
+# NN
+from tensorflow.keras.layers import Input, Dense
+from tensorflow.keras.models import Model
+from keras.optimizers import Adam
 
 # timeseries
 from statsmodels.tsa.seasonal import seasonal_decompose
@@ -88,6 +92,11 @@ class ProjetAustralieModelisation:
             self.palette.append(pc.unconvert_from_RGB_255(pc.unlabel_rgb(palette_set1[i])))
             
 
+    def copie(self, source):
+        self.X = source.X
+        self.y = source.y
+        self.data = source.data
+        
     def _modelisation_preparation(self, cible:str, scale:bool, climat:int=None, location:str=""):
         
         # filtrage eventuel
@@ -155,8 +164,8 @@ class ProjetAustralieModelisation:
         self.y_test = y_test
         
         
-    def _modelisation_matrice_confusion(self, clf):
-        y_pred = clf.predict(self.X_test)
+    def _modelisation_matrice_confusion(self, modele):
+        y_pred = modele.predict(self.X_test)
         print(pd.crosstab(self.y_test, y_pred, rownames=['Classe réelle'], colnames=['Classe prédite']))
         
         
@@ -169,7 +178,7 @@ class ProjetAustralieModelisation:
         
         param_modele=None
         existe_proba=False
-        clf=None
+        modele=None
         hp=""
 
         print (f'\n -------\nModelisation de {cible} avec un {nom_modele}\n -------\n')
@@ -181,17 +190,17 @@ class ProjetAustralieModelisation:
         if nom_modele=='KNeighborsClassifier':
                         
             existe_proba=True
-            clf = KNeighborsClassifier(n_neighbors=1)
+            modele = KNeighborsClassifier(n_neighbors=1)
             param_modele={ 'n_neighbors': np.arange(1,6)
                       }          
             
         elif nom_modele=='DecisionTreeClassifier':
-            clf= DecisionTreeClassifier(random_state=0, max_depth=150)      
+            modele = DecisionTreeClassifier(random_state=0, max_depth=150)      
 
         elif nom_modele=='RandomForestClassifier':
         
             existe_proba=True
-            clf = RandomForestClassifier(max_depth=8, n_estimators=100, random_state=1)            
+            modele  = RandomForestClassifier(max_depth=8, n_estimators=100, random_state=1)            
             param_modele={ 'max_depth': range(10,21,5),
                           #'n_estimators': [5, 10, 50, 400, 800]
                           'n_estimators': [50, 100, 150]
@@ -201,7 +210,7 @@ class ProjetAustralieModelisation:
         # boosting (chaque machine apprend à ajuster les erreurs de la precedente)
         elif nom_modele=='GradientBoostingClassifier':
             existe_proba=True
-            clf=GradientBoostingClassifier(random_state=0, n_estimators=20, max_depth=4) 
+            modele=GradientBoostingClassifier(random_state=0, n_estimators=20, max_depth=4) 
             param_modele={ 'max_depth': range(9,30,1),
                           #'n_estimators': [5, 10, 50, 400, 800]
                           'n_estimators': [5, 10]
@@ -211,20 +220,20 @@ class ProjetAustralieModelisation:
         elif nom_modele=='XGBoost':
             if est_classification:
                 existe_proba=True
-                clf=xgb.XGBClassifier(random_state=0, learning_rate=.1, n_estimators=100, max_depth=4) 
+                modele=xgb.XGBClassifier(random_state=0, learning_rate=.1, n_estimators=100, max_depth=4) 
                 param_modele={ 'learning_rate': [0.1, 0.01, 0.001],
                               'n_estimators': [5, 10, 15, 20, 25],#, 50],
                               'max_depth': [3, 4, 5, 6],#, 7, 8, 9, 10],
                               }
             else:
-                clf=xgb.XGBRegressor(random_state=0, learning_rate=.1, n_estimators=100, max_depth=4)
+                modele=xgb.XGBRegressor(random_state=0, learning_rate=.1, n_estimators=100, max_depth=4)
 
         elif nom_modele=='MLPClassifier':
             
             # max 1000, hidden 1200, alpha 0.0001 : 70 71 79 90 85 (170 mn)
             existe_proba=True
             # sgd = MLPClassifier(random_state=1, max_iter=1000, hidden_layer_sizes=(1200,), alpha=0.0001) # 74%, 8mn / 97%             
-            clf = MLPClassifier(random_state=5, max_iter=300, hidden_layer_sizes=(100,100), verbose=0) # 74%, 8mn / 97%
+            modele = MLPClassifier(random_state=5, max_iter=300, hidden_layer_sizes=(100,100), verbose=0) # 74%, 8mn / 97%
             param_modele = {'hidden_layer_sizes': [(50,200,50), (100,100), (100,)],
                             #'activation': ['tanh', 'relu'],
                             #'solver': ['sgd', 'adam']
@@ -233,7 +242,7 @@ class ProjetAustralieModelisation:
         
         elif nom_modele=='DummyClassifier':
             existe_proba=True
-            clf=DummyClassifier(random_state=0, strategy='stratified')
+            modele=DummyClassifier(random_state=0, strategy='stratified')
             
         else:
             print("\n -------\nNom de modèle inconnu\n -------\n")
@@ -244,7 +253,7 @@ class ProjetAustralieModelisation:
             outer_cv = StratifiedKFold(n_splits=3, shuffle=True)
             resc = make_scorer(recall_score,pos_label=1) # la difficulte est de predire correctemetnt les jours où il pleut reellement => il faut optimiser le recall sur la cible 1
             
-            gcv = GridSearchCV(estimator=clf, 
+            gcv = GridSearchCV(estimator=modele, 
                         param_grid=param_modele,
                         #scoring='recall',
                         #scoring = resc,
@@ -268,15 +277,15 @@ class ProjetAustralieModelisation:
                 print(f"Temps fit: {(i_fin_fit-i_debut_fit)/60:.2f} minutes\n\n")
             """  
             
-            clf = gcv.best_estimator_
+            modele = gcv.best_estimator_
             print (gcv.best_params_)
             hp = gcv.best_params_
             self.gcv = gcv
     
         else:
-            clf.fit(self.X_train, self.y_train)
+            modele.fit(self.X_train, self.y_train)
         
-        self.clf=clf
+        self.modele=modele
         self.titre_modele = self.titre_graphe(nom_modele, hp, climat, location, cible)
 
         # n'execute la suite que si on veut le traitement total
@@ -285,35 +294,35 @@ class ProjetAustralieModelisation:
             return
 
         
-        print('Modele ', type(clf))
+        print('Modele ', type(modele))
         
-        predictions=clf.predict(self.X_train)
+        predictions=modele.predict(self.X_train)
         i_fin_train=time.time()
 
-        predictions=clf.predict(self.X_test)
+        predictions=modele.predict(self.X_test)
         i_fin_test=time.time()
 
         # s'il s'agit de classfication:        
         if est_classification:
         
-            print ("Precision train: {:.2f}% - Temps train: {:.2f} minutes".format(clf.score(self.X_train, self.y_train)*100, (i_fin_train-i_temps_debut)/60))
-            print ("Precision test: {:.2f}% - Temps test: {:.2f} minutes".format(clf.score(self.X_test, self.y_test)*100, (i_fin_test-i_fin_train)/60))
+            print ("Precision train: {:.2f}% - Temps train: {:.2f} minutes".format(modele.score(self.X_train, self.y_train)*100, (i_fin_train-i_temps_debut)/60))
+            print ("Precision test: {:.2f}% - Temps test: {:.2f} minutes".format(modele.score(self.X_test, self.y_test)*100, (i_fin_test-i_fin_train)/60))
     #        print (f"\nScore F1: {f1_score(self.y_test, predictions):.2f} - Accuracy: {accuracy_score(self.y_test, predictions):.2f} - Recall: {recall_score(self.y_test, predictions):.2f} - Precision: {precision_score(self.y_test, predictions):.2f}\n")
             
             
-            self._modelisation_matrice_confusion(self.clf)
+            self._modelisation_matrice_confusion(self.modele)
         
             predictions_proba=np.zeros(shape=predictions.shape)
             if existe_proba:
-                predictions_proba=clf.predict_proba(self.X_test).max(axis=1)
+                predictions_proba=modele.predict_proba(self.X_test).max(axis=1)
               
             # renvoie les predictions sur le jeu complet
-            #predictions=clf.predict(t_donnees_completes)
+            #predictions=modele.predict(t_donnees_completes)
             #predictions_proba=np.zeros(shape=predictions.shape)
     #        if existe_proba:
-    #╩            predictions_proba=clf.predict_proba(t_donnees_completes).max(axis=1)
+    #╩            predictions_proba=modele.predict_proba(t_donnees_completes).max(axis=1)
             
-            self.trace_courbe_roc(clf, self.titre_modele)
+            self.trace_courbe_roc(modele, self.titre_modele)
 
         # s'il s'agit de regression
         else:
@@ -325,20 +334,97 @@ class ProjetAustralieModelisation:
         print (" Temps comp: {:.2f} minutes".format( (i_fin_completes-i_fin_test)/60))
                 
         print (time.ctime())
+      
+    def modelisation_dnn(self, nom_modele:str="DNN", cible:str="RainTomorrow", gs:bool=True, climat:int=None, location:str="", totalite:bool=True):
+        # seules les variables débutant par Rain impliquent de la classification, sauf Rainfall
+        est_classification = cible.startswith("Rain") and not cible.startswith("Rainfall")
+                
+        print (time.ctime())      
+
+        print (f'\n -------\nModelisation de {cible} avec un {nom_modele}\n -------\n')
+        i_temps_debut=time.time()
         
-    def trace_courbe_roc(self, clf, titre_graphe:str=""):
-        y_test_pred_proba = clf.predict_proba(self.X_test)
-        fpr, tpr, thresholds = roc_curve(self.y_test, y_test_pred_proba[:,1])
+        self._modelisation_preparation(cible, True, climat, location)
+
+        # fait egalement un MinMax pour que les valeurs soient entre 0 et 1
+        minmax_scaler = MinMaxScaler()
+        minmax_scaler.fit(self.X)
+        self.X_train=minmax_scaler.transform(self.X_train)
+        self.X_test=minmax_scaler.transform(self.X_test)    
+
+        inputs = Input(shape=(self.X_train.shape[1]), name="Inputlay")
+        dense1 = Dense(units=50, activation='tanh', name='d1')
+        dense2 = Dense(units=30, activation='tanh', name='d2')
+        #dense3 = Dense(units=10, activation='tanh', name='d3')
+        dense4 = Dense(units=1, activation='sigmoid', name='d4')
+        
+        x = dense1(inputs)
+        x = dense2(x)
+        #x = dense3(x)
+        outputs = dense4(x)
+        
+        modele = Model(inputs = inputs, outputs = outputs)
+        modele.summary()
+        
+        opt = Adam(lr=1e-4)
+        modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
+
+        # gere le desequilibre        
+        from sklearn.utils import compute_class_weight
+        classWeight = compute_class_weight('balanced', classes=[0,1], y=self.y_train) 
+        classWeight = dict(enumerate(classWeight))
+        
+        history = modele.fit(self.X_train, self.y_train, epochs=1000, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=0)
+        
+        self.modele=modele
+        self.history=history
+        
+        nom_modele = self.titre_graphe(nom_modele, "", climat, location, cible)
+        
+        plt.figure(figsize=(16, 6))
+        plt.plot(history.history['val_binary_accuracy'], "g", label="Accuracy (Val)")
+        plt.plot(history.history['binary_accuracy'], "b", label="Accuracy (Train)")
+        plt.ylim((.5,.85))
+        plt.legend()
+        plt.xlabel("Epochs")
+        plt.ylabel("Accuracy")
+        plt.title(f"Historique d'Accuracy - \n{nom_modele}")
+        plt.show();
+        
+        self.test_pred = modele.predict(self.X_test)
+        self.test_pred_class = self.test_pred>.5
+        
+        print(classification_report(self.y_test, self.test_pred_class))
+        print (confusion_matrix(self.y_test, self.test_pred_class))
+
+        print(modele.evaluate(self.X_test, self.y_test))
+
+        i_fin_completes=time.time()
+        print (" Temps comp: {:.2f} minutes".format( (i_fin_completes-i_temps_debut)/60))
+        
+        self.trace_courbe_roc_dnn(self.test_pred, nom_modele)
+        
+        print (time.ctime())
+
+    def trace_courbe_roc_dnn(self, y_pred_proba, titre_graphe:str=""):
+        fpr, tpr, thresholds = roc_curve(self.y_test, y_pred_proba)
         roc_auc = auc(fpr, tpr)
         
+        # cherche seuil optimal
         diff_pr = tpr - fpr
         best_i_seuil = np.argmax(diff_pr)
         best_seuil = thresholds[best_i_seuil]
         
-        plt.figure(figsize=(8, 6))
+        # cherche valeurs pour 0,5
+        i_05 = np.abs(thresholds-.5).argmin()
+        fpr_05=fpr[i_05]
+        tpr_05=tpr[i_05]     
+        
+        plt.figure(figsize=(12, 9))
         plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'AUC = {roc_auc:.2f})')
         plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
         plt.plot(fpr[best_i_seuil], tpr[best_i_seuil], 'ro', markersize=8, label=f'Seuil Optimal = {best_seuil:.2f}')
+        plt.plot(fpr[i_05], tpr[i_05], 'ko', markersize=8, label=f'Seuil par défaut = 0.5')
         
         plt.xlim([0.0, 1.0])
         plt.ylim([0.0, 1.05])
@@ -350,7 +436,39 @@ class ProjetAustralieModelisation:
         plt.legend(loc='lower right')
         plt.show()
         
-        y_pred_seuil = clf.predict_proba(self.X_test)[:,1] >= best_seuil
+        
+    def trace_courbe_roc(self, modele, titre_graphe:str=""):
+        y_test_pred_proba = modele.predict_proba(self.X_test)
+        fpr, tpr, thresholds = roc_curve(self.y_test, y_test_pred_proba[:,1])
+        roc_auc = auc(fpr, tpr)
+        
+        # cherche seuil optimal
+        diff_pr = tpr - fpr
+        best_i_seuil = np.argmax(diff_pr)
+        best_seuil = thresholds[best_i_seuil]
+        
+        # cherche valeurs pour 0,5
+        i_05 = np.abs(thresholds-.5).argmin()
+        fpr_05=fpr[i_05]
+        tpr_05=tpr[i_05]     
+        
+        plt.figure(figsize=(12, 9))
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'AUC = {roc_auc:.2f})')
+        plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
+        plt.plot(fpr[best_i_seuil], tpr[best_i_seuil], 'ro', markersize=8, label=f'Seuil Optimal = {best_seuil:.2f}')
+        plt.plot(fpr[i_05], tpr[i_05], 'ko', markersize=8, label=f'Seuil par défaut = 0.5')
+        
+        plt.xlim([0.0, 1.0])
+        plt.ylim([0.0, 1.05])
+        plt.xlabel('Taux Faux Positifs')
+        plt.ylabel('Taux Vrais Positifs')
+        
+            
+        plt.title(f'Courbe ROC \n{titre_graphe}')
+        plt.legend(loc='lower right')
+        plt.show()
+        
+        y_pred_seuil = modele.predict_proba(self.X_test)[:,1] >= best_seuil
         print (f"\nScore F1: {f1_score(self.y_test, y_pred_seuil):.2f} - Accuracy: {accuracy_score(self.y_test, y_pred_seuil):.2f} - Recall: {recall_score(self.y_test, y_pred_seuil):.2f} - Precision: {precision_score(self.y_test, y_pred_seuil):.2f}\n")
         print (f"Matrice de confusion avec seuil de {best_seuil:.2f}:")
         print(pd.crosstab(self.y_test, y_pred_seuil, rownames=['Classe réelle'], colnames=['Classe prédite']))
@@ -374,7 +492,7 @@ class ProjetAustralieModelisation:
             self.modelisation(nom_modele, v_cible, gs, climat, location, totalite=False )
 
             # calcule AUC
-            y_test_pred_proba = self.clf.predict_proba(self.X_test)
+            y_test_pred_proba = self.modele.predict_proba(self.X_test)
             fpr, tpr, thresholds = roc_curve(self.y_test, y_test_pred_proba[:,1])
             roc_auc = auc(fpr, tpr)
             scores_auc.append(roc_auc)
@@ -438,7 +556,7 @@ class ProjetAustralieModelisation:
             v_cible = f"{cible}_J_{j:02d}"
             self.modelisation(nom_modele, v_cible, gs, climat, location, totalite=False )
 
-            predictions=self.clf.predict(self.X_test)
+            predictions=self.modele.predict(self.X_test)
             mse = mean_squared_error(self.y_test, predictions)
             mae = mean_absolute_error(self.y_test, predictions)
 
@@ -505,19 +623,31 @@ class ProjetAustralieModelisation:
         plt.show();              
         
         
-    def trace_shap(self):
+    def trace_shap(self, nom_modele:str="XGBoost"):
         # =============================================================================================
         # SHAP - waterfall
         # =============================================================================================
-        shap_explainer = shap.TreeExplainer(self.clf, feature_names=pm.X.columns)
+        
+        if nom_modele=="XGBoost" or nom_modele=="RandomForestClassfifier":
+            shap_explainer = shap.TreeExplainer(self.modele, feature_names=self.X.columns)
+        if nom_modele=="DNN":
+            shap_explainer = shap.Explainer(self.modele, self.X_train, feature_names=self.X.columns)
+        
         shap_values = shap_explainer(self.X_test)
         #shap_df = pd.DataFrame(shap_values.values, columns=self.X.columns)
                
         s = 0
+        
+        figure, ax = plt.subplots(1, 5, figsize=(30,6))
+        ax = ax.reshape(-1)
+        i=1
+
         for s in range(5):
             plt.figure()
+            #[plt.subplot(1,5,i)
             shap.plots.waterfall(shap_values[s], max_display=20, show=False)
-            plt.tight_layout()
+            #plt.tight_layout()
+            i+=1
         plt.show();
         
 #            file_out = f'{path_output}/waterfall_sample_{s}.png'
@@ -552,10 +682,20 @@ class ProjetAustralieModelisation:
                           "WindGustDir_X", "WindGustDir_Y"
                           ]
 #        for variable in list_variables:
-        for variable in self.X.columns:    
-            plt.figure()
-            shap.plots.scatter(shap_values[:, variable], show=False)
-            plt.tight_layout()
+        self.shap_values=shap_values
+    
+        n_cote = int(np.sqrt(len(self.X.columns)))+1
+        figure, ax = plt.subplots(n_cote, n_cote, figsize=(30,30))
+        ax = ax.reshape(-1)
+        i=1
+        for variable in self.X.columns:
+            #plt.figure()
+            
+            shap.plots.scatter(shap_values[:, variable], show=False, ax=ax[i])
+            
+            #plt.tight_layout()
+            #ax[i].tight_layout()
+            i+=1
 #            file_out = f'{path_output}/dependence_{variable}.png'
 #            plt.savefig(file_out)
         plt.show();
@@ -652,7 +792,7 @@ class ProjetAustralieModelisation:
                                 hover_name='Location', 
                                 color=cible, 
                                 #text='Location', 
-                                #labels=clf.labels_, 
+                                #labels=modele.labels_, 
                                 animation_frame="Date",
 #                                animation_group="Location",
                                 size_max=30, 
@@ -666,8 +806,11 @@ class ProjetAustralieModelisation:
         fig.update_layout(mapbox_style='open-street-map')
         fig.show(renderer='browser')      
 
+#source = pd.read_csv("data_process4_knnim_resample_J365.csv", index_col=0)
+
 #pm = ProjetAustralieModelisation(pd.read_csv("data_basique.csv", index_col=0))
-pm = ProjetAustralieModelisation(pd.read_csv("data_process4_knnim_resample_J365.csv", index_col=0))
+pm = ProjetAustralieModelisation(source)
+
 
 #pm.animation_variable()
 
