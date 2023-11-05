@@ -91,6 +91,9 @@ class ProjetAustralieModelisation:
         for i in range(7):
             self.palette.append(pc.unconvert_from_RGB_255(pc.unlabel_rgb(palette_set1[i])))
             
+        # libelle des climats
+        self.lib_climats = {0:"Côte Est", 1:"Nord", 2:"Centre", 3:"Sud-Est", 4:"Intermédiaire", 5:"Mount Ginini", 6:"Côte Sud"}
+            
 
     def copie(self, source):
         self.X = source.X
@@ -115,11 +118,7 @@ class ProjetAustralieModelisation:
         self.Xy = self.Xy.loc[:,~self.Xy.columns.str.startswith("Rain_J_")]
         self.Xy = self.Xy.loc[:,~self.Xy.columns.str.startswith("MaxTemp_J_")]
         self.Xy = self.Xy.loc[:,~self.Xy.columns.str.startswith("Rainfall_J_")]
-        
-        # on supprime la Location si elle est presente en str (utile uniquement pour filtrer en amont)
-        if hasattr(self.Xy, "Location"):
-            self.Xy = self.Xy.drop(columns="Location")
-        
+               
         # eclate les climats (variable categorielle!)
         self.Xy = pd.get_dummies(self.Xy, columns=['Climat'])
         
@@ -137,6 +136,7 @@ class ProjetAustralieModelisation:
         # on reinjecte la cible, on fait un dropna et on eclate entre X et y        
         self.Xy[cible] = self.y
         self.Xy = self.Xy.dropna()
+        
         self.y = self.Xy[cible]
         self.X = self.Xy.drop(columns=cible)      
         
@@ -145,12 +145,24 @@ class ProjetAustralieModelisation:
         #self.y = np.random.choice([0, 1], size=len(data), p=[ratio, 1-ratio])
 
         X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=66) 
+
+        # on supprime la Location si elle est presente en str (utile uniquement pour filtrer en amont)
+        #if hasattr(self.Xy, "Location"):
+        self.X_Location = self.X.Location # la conservation permet d'indexer facilement plus tard selon les Location
+        self.X_train_Location = X_train.Location # la conservation permet d'indexer facilement plus tard selon les Location
+        self.X_test_Location = X_test.Location # la conservation permet d'indexer facilement plus tard selon les Location
+        
+        self.Xy = self.Xy.drop(columns="Location")
+        self.X = self.X.drop(columns="Location")
+        X_train = X_train.drop(columns="Location")
+        X_test = X_test.drop(columns="Location")
         
         # normalisation
+        self.scaler = None
         if scale:
-            scaler = preprocessing.StandardScaler().fit(X_train)
-            X_train = scaler.transform(X_train)
-            X_test = scaler.transform(X_test)
+            self.scaler = preprocessing.StandardScaler().fit(X_train)
+            X_train = self.scaler.transform(X_train)
+            X_test = self.scaler.transform(X_test)
             
         #oversample = RandomOverSampler()
         # pip install threadpoolctl==3.1.0  pour avoir SMOTE sur + de 15 colonnes
@@ -163,6 +175,219 @@ class ProjetAustralieModelisation:
         self.X_test = X_test
         self.y_test = y_test
         
+    # determine les pvalue pour chaque jour de prediction dans le futur afin de determiner le nb de journées possibles de predictions pour une location donnee
+    def entraine_rainj_location(self, locations:list):
+        if not hasattr(self, "resultats_rainj_location"):
+            self.resultats_rainj_location = pd.DataFrame(columns=["J", "Location", "pvalue05", "pvaluebest", "AUC", "AccuracyTrain", "AccuracyTest", "RecallTest"])
+        
+        for location in locations:
+            for i in range(1,365):
+                self.modelisation(cible=f"Rain_J_{i:02d}", location=location, gs=False)
+                pv_05, pv_best = self.verification_significativite_modele()
+                self.resultats_rainj_location.loc[len(self.resultats_rainj_location)] = [i, location, pv_05, pv_best, self.res_roc_auc, self.res_acc_train_seuil, self.res_acc_test_seuil, self.res_recall_test_seuil]
+
+    # determine les pvalue pour chaque jour de prediction dans le futur afin de determiner le nb de journées possibles de predictions pour un climat donné
+    def entraine_rainj_climat(self, climat:int):
+        if not hasattr(self, "resultats_rainj_climat"):
+            self.resultats_rainj_climat = pd.DataFrame(columns=["J", "Climat", "pvalue05", "pvaluebest", "AUC", "AccuracyTrain", "AccuracyTest", "RecallTest"])
+        
+        if not hasattr(self, "resultats_rainj_climat_location"):
+            self.resultats_rainj_climat_location = pd.DataFrame(columns=["J", "Location", "pvalue05", "pvaluebest", "AUC", "AccuracyTrain", "AccuracyTest", "RecallTest"])
+        liste_locations = self.data[self.data.Climat==climat].Location.unique()
+        
+        for i in range(1,365):
+            self.modelisation(cible=f"Rain_J_{i:02d}", climat=climat, gs=False)
+            pv_05, pv_best = self.verification_significativite_modele()
+            self.resultats_rainj_climat.loc[len(self.resultats_rainj_climat)] = [i, climat, pv_05, pv_best, self.res_roc_auc, self.res_acc_train_seuil, self.res_acc_test_seuil, self.res_recall_test_seuil]
+            
+            for location in liste_locations:
+                self.performance_climat_sur_location(location,i)
+
+    # à partir d'un modele par climat, determine les performances sur une location
+    def performance_climat_sur_location(self, location:str, J:int):
+        X_train_Loc = self.X_train[self.X_train_Location == location]
+        y_train_Loc = self.y_train[self.X_train_Location == location]
+        X_test_Loc = self.X_test[self.X_test_Location == location]
+        y_test_Loc = self.y_test[self.X_test_Location == location]
+        
+        y_train_pred_seuil = self.modele.predict_proba(X_train_Loc)[:,1] >= self.res_roc_best_seuil
+        y_test_pred_seuil = self.modele.predict_proba(X_test_Loc)[:,1] >= self.res_roc_best_seuil
+        y_test_pred = self.modele.predict(X_test_Loc)
+               
+        res_acc_train_seuil = accuracy_score(y_train_Loc, y_train_pred_seuil)
+        res_acc_test_seuil = accuracy_score(y_test_Loc, y_test_pred_seuil)
+        res_recall_test_seuil = recall_score(y_test_Loc, y_test_pred_seuil)
+        
+        pv_05 = self.verification_significativite(y_test_Loc, y_test_pred)
+        pv_best = self.verification_significativite(y_test_Loc, y_test_pred_seuil)
+        
+        self.resultats_rainj_climat_location.loc[len(self.resultats_rainj_climat_location)] = [J, location, pv_05, pv_best, 2, res_acc_train_seuil, res_acc_test_seuil, res_recall_test_seuil]
+        
+            
+    def entraine_rainj_tous_climats(self):
+        self.resultats_rainj_climat = pd.DataFrame(columns=["J", "Climat", "pvalue05", "pvaluebest", "AUC", "AccuracyTrain", "AccuracyTest", "RecallTest"])
+        self.resultats_rainj_climat_location = pd.DataFrame(columns=["J", "Location", "pvalue05", "pvaluebest", "AUC", "AccuracyTrain", "AccuracyTest", "RecallTest"])
+        for i in np.sort(self.data.Climat.unique()):
+            self.entraine_rainj_climat(i)
+        
+    def affiche_pvalue_rainj_climats(self):
+        self.resultats_rainj_climat = pd.read_csv("resultats_rainj_climat.csv")
+        
+        figure, ax = plt.subplots(self.resultats_rainj_climat.Climat.nunique(), 1, figsize=(25,20))
+        xtick = [*range(1,8), *range(8,365,7)]
+        num_ax=0
+        for i in np.sort(self.resultats_rainj_climat.Climat.unique()):
+            
+            ax[num_ax].plot(self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].J.values, self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].pvalue05.values, label="p-value d'après prédictions selon seuil par défaut (0,5)")
+            ax[num_ax].plot(self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].J.values, self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].pvaluebest.values, label="p-value d'après prédictions selon seuil optimal")
+            ax[num_ax].set_title(f"pvalues pour climat {i} ({self.lib_climats[i]})")
+            ax[num_ax].axhline(.05, color = 'r', linestyle = '--')
+            ax[num_ax].set_xticks(xtick)
+            ax[num_ax].legend(loc="upper right")
+
+            num_ax+=1
+        plt.show();
+        
+        
+    def affiche_perfs_rainj_climats(self):
+        self.resultats_rainj_climat = pd.read_csv("resultats_rainj_climat.csv")
+        
+        figure, ax = plt.subplots(self.resultats_rainj_climat.Climat.nunique(), 1, figsize=(25,20))
+        #figure, ax = plt.subplots(self.resultats_rainj_climat.Climat.nunique()+1, 1, figsize=(25,20))
+        
+        xtick = [*range(1,8), *range(8,365,7)]
+        num_ax=0
+        for i in np.sort(self.resultats_rainj_climat.Climat.unique()):
+        #for i in []:
+            ax[num_ax].plot(self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].J.values, self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].AccuracyTrain.values, label="Accuracy (train)")
+            ax[num_ax].plot(self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].J.values, self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].AccuracyTest.values, label="Accuracy (test)")
+            ax[num_ax].plot(self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].J.values, self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].RecallTest.values, label="Recall (test)")
+            ax[num_ax].plot(self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].J.values, self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].AUC.values, label="AUC")
+            ax[num_ax].set_title(f"Variables de Performances pour climat {i} ({self.lib_climats[i]})")
+            ax[num_ax].axhline(.6, color = '#666', linestyle = '--')
+            ax[num_ax].axhline(.55, color = '#666', linestyle = '--')
+            ax[num_ax].axhline(.5, color = '#666', linestyle = '--')
+            ax[num_ax].set_xticks(xtick)
+            ax[num_ax].legend(loc="upper right")
+
+            num_ax+=1
+        plt.show();
+
+    def affiche_pvalue_rainj_locations(self, locations:list=[], data=None):
+        #self.resultats_rainj_location = pd.read_csv("resultats_rainj_location.csv")
+        
+        if data is None:
+            data = pd.read_csv("resultats_rainj_location.csv")
+        
+        if len(locations)>0:
+            liste = locations
+        else:
+            liste = data.Location.unique()
+
+        figure, ax = plt.subplots(len(liste), 1, figsize=(25,20))
+        xtick = [*range(1,8), *range(8,365,7)]
+        num_ax=0
+        
+        for i in np.sort(liste):
+            
+            ax[num_ax].plot(data[data.Location==i].J.values, data[data.Location==i].pvalue05.values, label="p-value d'après prédictions selon seuil par défaut (0,5)")
+            ax[num_ax].plot(data[data.Location==i].J.values, data[data.Location==i].pvaluebest.values, label="p-value d'après prédictions selon seuil optimal")
+            ax[num_ax].set_title(f"pvalues pour {i}")
+            ax[num_ax].axhline(.05, color = 'r', linestyle = '--')
+            ax[num_ax].set_xticks(xtick)
+            ax[num_ax].legend(loc="upper right")
+
+            num_ax+=1
+        plt.show();
+        
+        
+    def affiche_perfs_rainj_locations(self, locations:list=[], data=None):
+        #self.resultats_rainj_location = pd.read_csv("resultats_rainj_location.csv")
+        if data is None:
+            data = pd.read_csv("resultats_rainj_location.csv")
+
+        
+        if len(locations)>0:
+            liste = locations
+        else:
+            liste = data.Location.unique()
+        
+        figure, ax = plt.subplots(len(liste), 1, figsize=(25,20))
+        #figure, ax = plt.subplots(self.resultats_rainj_climat.Climat.nunique()+1, 1, figsize=(25,20))
+        
+        xtick = [*range(1,8), *range(8,365,7)]
+        num_ax=0       
+        
+        for i in np.sort(liste):
+        #for i in []:
+            ax[num_ax].plot(data[data.Location==i].J.values, data[data.Location==i].AccuracyTrain.values, label="Accuracy (train)")
+            ax[num_ax].plot(data[data.Location==i].J.values, data[data.Location==i].AccuracyTest.values, label="Accuracy (test)")
+            ax[num_ax].plot(data[data.Location==i].J.values, data[data.Location==i].RecallTest.values, label="Recall (test)")
+            #ax[num_ax].plot(data[data.Location==i].J.values, data[data.Location==i].AUC.values, label="AUC")
+            ax[num_ax].set_title(f"Variables de Performances pour {i}")
+            ax[num_ax].axhline(.6, color = '#666', linestyle = '--')
+            ax[num_ax].axhline(.55, color = '#666', linestyle = '--')
+            ax[num_ax].axhline(.5, color = '#666', linestyle = '--')
+            ax[num_ax].set_xticks(xtick)
+            ax[num_ax].legend(loc="upper right")
+
+            num_ax+=1
+        plt.show();
+
+    # ---
+    # fais une prediction à partir d'un modele entrainé sur une ville pour une date donnée    
+    # affiche variables explicatives de shap
+    # ---
+    def predit(self, date:str):
+        X = self.X[self.X.index==date]
+        y = self.y[self.y.index==date]
+
+        if self.scaler!=None:
+            X = self.scaler.transform(X)
+            
+        y_pred = self.modele.predict_proba(X)>=self.res_roc_best_seuil
+
+        dict_pluie={0:'Pas de pluie', 1:'Pluie'}
+        
+        s_exacte="fausse"
+        if y.iloc[0] == y_pred[0]:
+            s_exacte="exacte"
+
+        if not hasattr(self, "resultats_pred"):
+            self.resultats_pred = pd.DataFrame(columns=["Reel", "Predit", "Exact"])
+        self.resultats_pred.loc[date] = [y.iloc[0], y_pred[0], (y_pred[0] == y.iloc[0])]
+
+        print (f"Prédiction {s_exacte} - Jour: {date} Réel: {dict_pluie[y.iloc[0]]} Prédit: {dict_pluie[y_pred[0]]}")
+        
+        
+        shap_values = self.shap_explainer(X)
+        figure = plt.figure(figsize=(30,6))
+        shap.plots.waterfall(shap_values[0], max_display=20, show=False)
+        plt.tight_layout()
+        plt.title(f"Prévision pour le {date} {s_exacte} - Réel: {dict_pluie[y.iloc[0]]} - Prédit: {dict_pluie[y_pred[0]]}")
+        plt.show();
+        
+    
+    def predit_mois(self):
+        for i in range(1,31):
+            self.predit(f"2010-09-{i:02d}")
+        
+    # fais un test de Chi2 pour verifier significativite des resultats
+    def verification_significativite(self, y_reel, y_pred):
+        from scipy.stats import chi2_contingency
+        tcd = pd.crosstab(y_reel, y_pred)
+        _,pval,_,_ =chi2_contingency(tcd)
+        
+        return pval
+        
+    # retourne le tuple des pvalue du test de Chi2 pour les predictions selon le seuil par défaut et celui optimal
+    def verification_significativite_modele(self):
+        y_pred_proba = self.modele.predict_proba(self.X_test)
+        
+        pval05   = self.verification_significativite(self.y_test, y_pred_proba[:,1] >= .5)
+        pvalbest = self.verification_significativite(self.y_test, y_pred_proba[:,1] >= self.res_roc_best_seuil)
+        
+        return (pval05, pvalbest)
         
     def _modelisation_matrice_confusion(self, modele):
         y_pred = modele.predict(self.X_test)
@@ -314,21 +539,26 @@ class ProjetAustralieModelisation:
         
             predictions_proba=np.zeros(shape=predictions.shape)
             if existe_proba:
-                predictions_proba=modele.predict_proba(self.X_test).max(axis=1)
+                predictions_proba=modele.predict_proba(self.X_test)
               
             # renvoie les predictions sur le jeu complet
             #predictions=modele.predict(t_donnees_completes)
             #predictions_proba=np.zeros(shape=predictions.shape)
     #        if existe_proba:
     #╩            predictions_proba=modele.predict_proba(t_donnees_completes).max(axis=1)
-            
+            self.pp = predictions_proba        
+    
             self.trace_courbe_roc(modele, self.titre_modele)
+            
+            # test le caractere significatif des resultats
+            print ("P-value pour Test de X² avec seuil par défaut de 0,5: ", self.verification_significativite(self.y_test, predictions))
+            print (f"Test de X² avec seuil optimal ({self.res_roc_best_seuil:.2f}): ", self.verification_significativite(self.y_test, predictions_proba[:,1] >= self.res_roc_best_seuil))
 
         # s'il s'agit de regression
         else:
-            mse = mean_squared_error(self.y_test, predictions)
+            rmse = np.sqrt(mean_squared_error(self.y_test, predictions))
             mae = mean_absolute_error(self.y_test, predictions)
-            print (f"\n ----- \n MSE : {mse:.2f} - MAE : {mae:.2f}\n ----- \n\n")
+            print (f"\n ----- \n RMSE : {rmse:.2f} - MAE : {mae:.2f}\n ----- \n\n")
 
         i_fin_completes=time.time()
         print (" Temps comp: {:.2f} minutes".format( (i_fin_completes-i_fin_test)/60))
@@ -414,6 +644,7 @@ class ProjetAustralieModelisation:
         diff_pr = tpr - fpr
         best_i_seuil = np.argmax(diff_pr)
         best_seuil = thresholds[best_i_seuil]
+        self.res_roc_best_seuil = best_seuil
         
         # cherche valeurs pour 0,5
         i_05 = np.abs(thresholds-.5).argmin()
@@ -441,11 +672,13 @@ class ProjetAustralieModelisation:
         y_test_pred_proba = modele.predict_proba(self.X_test)
         fpr, tpr, thresholds = roc_curve(self.y_test, y_test_pred_proba[:,1])
         roc_auc = auc(fpr, tpr)
+        self.res_roc_auc = roc_auc
         
         # cherche seuil optimal
         diff_pr = tpr - fpr
         best_i_seuil = np.argmax(diff_pr)
         best_seuil = thresholds[best_i_seuil]
+        self.res_roc_best_seuil = best_seuil
         
         # cherche valeurs pour 0,5
         i_05 = np.abs(thresholds-.5).argmin()
@@ -468,8 +701,17 @@ class ProjetAustralieModelisation:
         plt.legend(loc='lower right')
         plt.show()
         
-        y_pred_seuil = modele.predict_proba(self.X_test)[:,1] >= best_seuil
-        print (f"\nScore F1: {f1_score(self.y_test, y_pred_seuil):.2f} - Accuracy: {accuracy_score(self.y_test, y_pred_seuil):.2f} - Recall: {recall_score(self.y_test, y_pred_seuil):.2f} - Precision: {precision_score(self.y_test, y_pred_seuil):.2f}\n")
+        y_pred_seuil = modele.predict_proba(self.X_test)[:,1] >= best_seuil       
+        
+        self.res_acc_test_seuil = accuracy_score(self.y_test, y_pred_seuil)
+        self.res_recall_test_seuil = recall_score(self.y_test, y_pred_seuil)
+        
+        # calcul aussi sur le train pour s'assurer qu'il n'y ait pas d'overfit
+        y_train_pred_seuil = modele.predict_proba(self.X_train)[:,1] >= best_seuil       
+        self.res_acc_train_seuil = accuracy_score(self.y_train, y_train_pred_seuil)
+        
+        
+        print (f"\nScore F1: {f1_score(self.y_test, y_pred_seuil):.2f} - Accuracy: {self.res_acc_test_seuil:.2f} - Recall: {self.res_recall_test_seuil:.2f} - Precision: {precision_score(self.y_test, y_pred_seuil):.2f}\n")
         print (f"Matrice de confusion avec seuil de {best_seuil:.2f}:")
         print(pd.crosstab(self.y_test, y_pred_seuil, rownames=['Classe réelle'], colnames=['Classe prédite']))
 
@@ -478,7 +720,7 @@ class ProjetAustralieModelisation:
     def titre_graphe(self, nom_modele:str, hp:str, climat:int=None, location:str="", cible:str=""):
         titre_clim_loc=""        
         if climat!=None:
-            titre_clim_loc="\nClimat: "+str(climat)
+            titre_clim_loc="\nClimat: "+str(climat)+" ("+self.lib_climats[climat]+")"
         if location!="":
             titre_clim_loc="\nLocation: "+location
             
@@ -533,7 +775,7 @@ class ProjetAustralieModelisation:
         
         if mode=="Climat":
             for score_auc, item_type in zip(scores_auc, types):
-                plt.plot(range(1,nbj), score_auc, label=f"Climat {item_type}", color=self.palette[item_type])
+                plt.plot(range(1,nbj), score_auc, label=f"Climat {item_type} ({self.lib_climats[item_type]})", color=self.palette[item_type])
         else:
             for score_auc, item_type in zip(scores_auc, types):
                 plt.plot(range(1,nbj), score_auc, label=f"{item_type}")
@@ -548,8 +790,8 @@ class ProjetAustralieModelisation:
         
     # regressions
     
-    def MSE_nb_J(self, nom_modele:str="XGBoost", cible:str="MaxTemp", gs:bool=False, climat:int=None, location:str="", nbj:int=8):
-        scores_mse=[]
+    def RMSE_nb_J(self, nom_modele:str="XGBoost", cible:str="MaxTemp", gs:bool=False, climat:int=None, location:str="", nbj:int=8):
+        scores_rmse=[]
         scores_mae=[]
         
         for j in range(1,nbj):
@@ -557,31 +799,31 @@ class ProjetAustralieModelisation:
             self.modelisation(nom_modele, v_cible, gs, climat, location, totalite=False )
 
             predictions=self.modele.predict(self.X_test)
-            mse = mean_squared_error(self.y_test, predictions)
+            rmse = np.sqrt(mean_squared_error(self.y_test, predictions))
             mae = mean_absolute_error(self.y_test, predictions)
 
-            scores_mse.append(mse)
+            scores_rmse.append(rmse)
             scores_mae.append(mae)
             
-        return scores_mse, scores_mae        
+        return scores_rmse, scores_mae        
 
     
-    def MSE_par_climat(self, nom_modele:str="XGBoost", cible:str="MaxTemp", gs:bool=False, nbj:int=8):
-        all_scores_mse=[]
+    def RMSE_par_climat(self, nom_modele:str="XGBoost", cible:str="MaxTemp", gs:bool=False, nbj:int=8):
+        all_scores_rmse=[]
         all_scores_mae=[]
         climats=[]
         for climat in self.data.Climat.unique():
-            mse, mae = self.MSE_nb_J(nom_modele, cible, gs=gs, climat=climat, nbj=nbj)
-            all_scores_mse.append(mse)
+            rmse, mae = self.RMSE_nb_J(nom_modele, cible, gs=gs, climat=climat, nbj=nbj)
+            all_scores_rmse.append(rmse)
             all_scores_mae.append(mae)
             
             climats.append(climat)
             
-        self.scores_trace(all_scores_mse, climats, nbj=nbj, cible=cible, libelle="MSE")
+        self.scores_trace(all_scores_rmse, climats, nbj=nbj, cible=cible, libelle="RMSE")
         self.scores_trace(all_scores_mae, climats, nbj=nbj, cible=cible, libelle="MAE")
         
-    def MSE_par_location(self, nom_modele:str="XGBoost", cible:str="MaxTemp", gs:bool=False, climat:int="", nbj:int=8):
-        all_scores_mse=[]
+    def RMSE_par_location(self, nom_modele:str="XGBoost", cible:str="MaxTemp", gs:bool=False, climat:int="", nbj:int=8):
+        all_scores_rmse=[]
         all_scores_mae=[]
         locations=[]       
         
@@ -593,23 +835,23 @@ class ProjetAustralieModelisation:
             liste_locations=self.data.Location.unique()
         
         for location in liste_locations:
-            mse, mae = self.MSE_nb_J(nom_modele, cible, gs=gs, location=location, nbj=nbj)
-            all_scores_mse.append(mse)
+            rmse, mae = self.RMSE_nb_J(nom_modele, cible, gs=gs, location=location, nbj=nbj)
+            all_scores_rmse.append(rmse)
             all_scores_mae.append(mae)
             
             locations.append(location)
             
-        self.scores_trace(all_scores_mse, locations, mode="Location", nbj=nbj, cible=cible, libelle="MSE")
+        self.scores_trace(all_scores_rmse, locations, mode="Location", nbj=nbj, cible=cible, libelle="RMSE")
         self.scores_trace(all_scores_mae, locations, mode="Location", nbj=nbj, cible=cible, libelle="MAE")
 
         
         
-    def scores_trace(self, scores, types, mode:str="Climat", nbj:int=8, cible:str="MaxTemp", libelle="MSE"):
+    def scores_trace(self, scores, types, mode:str="Climat", nbj:int=8, cible:str="MaxTemp", libelle="RMSE"):
         fig = plt.figure(figsize=(12,8))
 
         if mode=="Climat":
             for score, item_type in zip(scores, types):
-                plt.plot(range(1,nbj), score, label=f"Climat {item_type}", color=self.palette[item_type])
+                plt.plot(range(1,nbj), score, label=f"Climat {item_type} ({self.lib_climats[item_type]})", color=self.palette[item_type])
         else:
             for score, item_type in zip(scores, types):
                 plt.plot(range(1,nbj), score, label=f"{item_type}")
@@ -632,6 +874,8 @@ class ProjetAustralieModelisation:
             shap_explainer = shap.TreeExplainer(self.modele, feature_names=self.X.columns)
         if nom_modele=="DNN":
             shap_explainer = shap.Explainer(self.modele, self.X_train, feature_names=self.X.columns)
+
+        self.shap_explainer = shap_explainer
         
         shap_values = shap_explainer(self.X_test)
         #shap_df = pd.DataFrame(shap_values.values, columns=self.X.columns)
