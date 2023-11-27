@@ -45,13 +45,14 @@ class ProjetAustralie:
         self.df = self.df.drop(columns="Date")
         
         # remplace les variables catégorielles
-        self.df = pd.get_dummies(self.df)
+        #self.df = pd.get_dummies(self.df)
+        self.df = pd.get_dummies(self.df, columns=['WindGustDir', 'WindDir9am', 'WindDir3pm'])
 
         # retrait des 4 variables avec trop de nuls
         self.df = self.df.drop(columns=["Sunshine", "Evaporation", "Cloud9am", "Cloud3pm"])
 #        self.df = self.df.drop(columns=["Evaporation", "Cloud9am", "Cloud3pm"])
 
-        # retrait "bourrin" des NA (à affiner plus tard)
+        # retrait massif des NA sans remplacement
         self.df = self.df.dropna()
 
         # indique qu'on a deja fait cette etape
@@ -77,7 +78,7 @@ class ProjetAustralie:
         self.clusterisation_groupee()      
       
         # ajoute des variables cibles sur les prochains jours
-        self.ajoute_variables_cibles()
+        #self.ajoute_variables_cibles()
 
         # ajoute le climat dans le df final
         self.df = self.df.merge(self.df_climat, on="Location")      
@@ -93,35 +94,40 @@ class ProjetAustralie:
         #self.df = self.df.drop(columns=["MinTemp", "Temp9am", "Temp3pm", "Pressure3pm"])
         #self.df = self.df.drop(columns=["Sunshine", "Evaporation", "Cloud9am", "Cloud3pm"])
         
+        # si l'attribut n'a pas encore été créé, alors on fait la reindexation temporelle
+        if not hasattr(self, "df_resample"):
+            self.reindexation_temporelle()       
+
         # supprime la date (dispo en index)
         self.df = self.df.drop(columns="Date")
 
-        print ("Nb Loc d", self.df.Location.nunique())
+        print ("Nb Loc d", self.df.Location.nunique(), self.df.index.max())
 
         # ajoute les proprietes des villes
         self._ajoute_prop_locations()
-        print ("Nb Loc e", self.df.Location.nunique())
+        print ("Nb Loc e", self.df.Location.nunique(), self.df.index.max())
 
         # determine les climats
         #self.clusterisation_groupee()
         #self.df = self.df.merge(self.df_climat, on="Location")             
         
-        print ("Nb Loc f", self.df.Location.nunique())
+        print ("Nb Loc f", self.df.Location.nunique(), self.df.index.max())
         
         # supprime variables redondantes du vent
         self.df = self.df.drop(columns=["WindGustDir_RAD", "WindDir9am_RAD", "WindDir3pm_RAD"])       
 #        self.df = self.df.drop(columns=["WindGustSpeed", "WindSpeed9am", "WindSpeed3pm"])       
         
-        print ("Nb Loc g", self.df.Location.nunique())
+        print ("Nb Loc g", self.df.Location.nunique(), self.df.index.max())
 
         # ajoute une variable marquant la saisonnalité
-        self.df["SaisonCos"] = -np.cos(4*np.pi*(self.df.index.day_of_year-1)/365)
+        self.df["SaisonCos4pi"] = -np.cos(4*np.pi*(self.df.index.day_of_year-1)/365)
+        self.df["SaisonCos2pi"] = np.cos(2*np.pi*(self.df.index.day_of_year-1)/365)
 
         # enleve les lignes avec + de 50% de NA
         if not pour_serie_temporelle:
             self.df = self.df.dropna(thresh=len(self.df.columns)*.5, axis=0)
 
-        print ("Nb Loc g2", self.df.Location.nunique())
+        print ("Nb Loc g2", self.df.Location.nunique(), self.df.index.max())
 
         # enleve les lignes dont la variable cible est NA
         # je commente vu que la variable cible va bouger en realite
@@ -137,7 +143,7 @@ class ProjetAustralie:
         # retrait "bourrin" des NA (à affiner plus tard)
 #        self.df = self.df.dropna()
                 
-        print ("Nb Loc h", self.df.Location.nunique())
+        print ("Nb Loc h", self.df.Location.nunique(), self.df.index.max())
         
         
         # supprime le nom de la ville, puisqu'on a ses coordonnées => pas de dummies sur le nom de la ville

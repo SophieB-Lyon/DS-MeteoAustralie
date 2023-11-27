@@ -42,9 +42,10 @@ from sklearn.dummy import DummyClassifier
 import xgboost as xgb
 
 # NN
-from tensorflow.keras.layers import Input, Dense
-from tensorflow.keras.models import Model
+from tensorflow.keras.layers import Input, Dense, LSTM, Dropout
+from tensorflow.keras.models import Model, Sequential
 from keras.optimizers import Adam
+from keras.preprocessing.sequence import TimeseriesGenerator
 
 # timeseries
 from statsmodels.tsa.seasonal import seasonal_decompose
@@ -81,6 +82,10 @@ class ProjetAustralieModelisation:
         #self.data = data.dropna()
         self.data = data
         
+        self.data.index = pd.to_datetime(self.data.index)
+        
+        #self.data = self.data.drop(columns=["SaisonCos"])
+        
         # s'il n'y a que mount ginini en climat 5, on degage
         if (self.data[self.data.Climat==5].Location.nunique()==1):
             self.data = self.data[self.data.Climat!=5]
@@ -99,8 +104,14 @@ class ProjetAustralieModelisation:
         self.X = source.X
         self.y = source.y
         self.data = source.data
-        
-    def _modelisation_preparation(self, cible:str, scale:bool, climat:int=None, location:str=""):
+    
+    # ---------
+    # ---------
+    # prepare les donnees pour l'apprentissage (2eme fonction la plus importante du module)
+    # ---------
+    # ---------
+    
+    def _modelisation_preparation(self, cible:str, scale:bool, climat:int=None, location:str="", cut2016:bool=False):
         
         # filtrage eventuel
         data=self.data
@@ -108,7 +119,11 @@ class ProjetAustralieModelisation:
             data = self.data[self.data.Climat==climat]
         if location!="":
             data = self.data[self.data.Location==location]
-        
+
+        # si cut2016 est a true, alors on va utiliser les données de 2016 comme données de validation et laisser les données anterieures pour l'apprentissage et les tests
+#        if cut2016:
+#            data["Date"]=date.index
+
             
         #self.X = data.drop(columns=cible)      
         self.Xy = data.copy()
@@ -121,6 +136,7 @@ class ProjetAustralieModelisation:
                
         # eclate les climats (variable categorielle!)
         self.Xy = pd.get_dummies(self.Xy, columns=['Climat'])
+#        self.Xy = pd.get_dummies(self.Xy, columns=['WindGustDir', 'WindDir9am', 'WindDir3pm'])
         
         
         # supprime les autres colonnes donnant trop d'indices
@@ -129,13 +145,19 @@ class ProjetAustralieModelisation:
         if cible.startswith("Rain_J_"):
             self.Xy = self.Xy.drop(columns=["RainTomorrow"]) # si on veut predire RainToday, on supprime Rainfall, sinon c'est de la triche...
 
+        # enleve toutes les features enginerees precedemment
+        #self.Xy = self.Xy.loc[:,~self.Xy.columns.str.startswith("Climat")]
+        #self.Xy = self.Xy.drop(columns=["lat", "lng", "AmplitudeTemp", "SaisonCos2pi", "SaisonCos4pi"])
+        #self.Xy = self.Xy.drop(columns=["SaisonCos2pi"])
+
+
         #self.X = self.X.drop(columns=self.X.columns[self.X.columns.str.startswith('WindGustDir')])
         if cible.startswith("Wind"):
             self.Xy = self.Xy.drop(columns=self.Xy.columns[self.Xy.columns.str.startswith('Wind')])
 
         # on reinjecte la cible, on fait un dropna et on eclate entre X et y        
         self.Xy[cible] = self.y
-        self.Xy = self.Xy.dropna()
+        self.Xy = self.Xy.dropna()       
         
         self.y = self.Xy[cible]
         self.X = self.Xy.drop(columns=cible)      
@@ -143,6 +165,17 @@ class ProjetAustralieModelisation:
         # variable cible aleatoire
         ratio = len(data[data.RainTomorrow==0]) / len(data)
         #self.y = np.random.choice([0, 1], size=len(data), p=[ratio, 1-ratio])
+
+        # si cut2016 est a true, alors on va utiliser les données de 2016 comme données de validation et laisser les données anterieures pour l'apprentissage et les tests
+        if cut2016:
+            self.X_2016=self.X[self.X.index>='2016-01-01']
+            self.y_2016=self.y[self.y.index>='2016-01-01']
+            self.X_2016_Location = self.X_2016.Location
+            self.X_2016 = self.X_2016.drop(columns="Location")
+
+            self.X = self.X[self.X.index<'2016-01-01']
+            self.y=self.y[self.y.index<'2016-01-01']
+            self.Xy = self.Xy[self.Xy.index<'2016-01-01']
 
         X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=66) 
 
@@ -163,6 +196,13 @@ class ProjetAustralieModelisation:
             self.scaler = preprocessing.StandardScaler().fit(X_train)
             X_train = self.scaler.transform(X_train)
             X_test = self.scaler.transform(X_test)
+            colX = self.X.columns
+            self.X = pd.DataFrame(self.scaler.transform(self.X), columns=colX)
+
+            # si cut2016 est a true, alors on va utiliser les données de 2016 comme données de validation et laisser les données anterieures pour l'apprentissage et les tests
+            if cut2016:
+                self.X_2016 = self.scaler.transform(self.X_2016)
+
             
         #oversample = RandomOverSampler()
         # pip install threadpoolctl==3.1.0  pour avoir SMOTE sur + de 15 colonnes
@@ -174,6 +214,247 @@ class ProjetAustralieModelisation:
         self.y_train = y_train
         self.X_test = X_test
         self.y_test = y_test
+        
+    # prepare les donnees en vue d'entrainer un RNN
+    # pre-requis: preparation sur une location donnée uniquement (pour garantir unicité des dates et avoir une coherence temporelle) et ne pas se disperser sur differents lieux chaque jour
+    def _modelisation_preparation_rnn(self, location:str, cible:str):
+        
+        # longueur des sequences
+        self.rnn_sequence_longueur = 15
+        self.rnn_batch_size = 1
+        
+        # la cible n'a en realite pas d'importance ici
+        self._modelisation_preparation(cible="RainTomorrow", scale=False, location=location)
+        
+        self.XyOrig = self.Xy[cible]
+        
+        # comme on est sur une location en particulier, pas d'interet de conserver les climats
+        self.Xy = self.Xy.loc[:,~self.Xy.columns.str.startswith("Climat_")]
+        # lat et lng sont identiques puisque meme Location: on droppe aussi
+        # raintomorrow n'a pas non plus d'interet dans cette approche
+        self.Xy = self.Xy.drop(columns=["lat", "lng", "RainTomorrow"])
+        
+        
+        self.scaler_rnn = preprocessing.MinMaxScaler().fit(self.Xy)
+        colXy = self.Xy.columns
+        indexXy = self.Xy.index
+        self.Xy = pd.DataFrame(self.scaler_rnn.transform(self.Xy), columns=colXy, index=indexXy)
+        
+        proportion_1=.7
+        proportion_2=.9
+        self.indice_coupure_1 = int(len(self.Xy) * proportion_1)
+        self.indice_coupure_2 = int(len(self.Xy) * proportion_2)
+#        self.X_train = self.Xy[:indice_coupure_1]
+#        self.X_validation = self.Xy[indice_coupure_1:indice_coupure_2]
+#        self.X_test = self.Xy[indice_coupure_2:]       
+
+        self.X_train = self.Xy[cible][:self.indice_coupure_1]
+        self.X_validation = self.Xy[cible][self.indice_coupure_1:self.indice_coupure_2]
+        self.X_test = self.Xy[cible][self.indice_coupure_2:]
+
+        self.y_train = self.X_train
+        self.y_validation = self.X_validation
+        self.y_test = self.X_test
+        
+        
+        self.rnn_train_generator = TimeseriesGenerator(self.X_train, 
+                                              self.y_train,
+                                              length = self.rnn_sequence_longueur,
+                                              batch_size=self.rnn_batch_size,
+                                              stride=1
+                                              )
+        
+        self.rnn_validation_generator = TimeseriesGenerator(self.X_validation, 
+                                             self.y_validation,
+                                             length = self.rnn_sequence_longueur,
+                                             batch_size=self.rnn_batch_size,
+                                             stride=1
+                                             )
+
+        self.rnn_test_generator = TimeseriesGenerator(self.X_test, 
+                                             self.y_test,
+                                             length = self.rnn_sequence_longueur,
+                                             batch_size=self.rnn_batch_size,
+                                             stride=1
+                                             )
+
+        """
+        self._cree_sequence_rnn()
+        
+        proportion=.6
+        indice_coupure = int(len(self.rnn_cibles) * proportion)
+        self.X_train = self.rnn_features[:indice_coupure]
+        self.y_train = self.rnn_cibles[:indice_coupure]
+        self.X_test = self.rnn_features[indice_coupure:]
+        self.y_test = self.rnn_cibles[indice_coupure:]      
+        """
+        
+    # cree une sequence pour le rnn
+    def _cree_sequence_rnn(self):
+        # on va creer de nombreuses fenetres de predictions
+        
+        
+        rnn_features = []
+        rnn_cibles = []
+        
+        # on va deplacer une fenetre du debut à la fin des dates
+        for i in range(len(self.Xy)-self.rnn_sequence_longueur):
+        #for i in range(3):
+            
+            sequence = self.Xy.iloc[i:i+self.rnn_sequence_longueur]
+            features = sequence.iloc[:-1].values
+            cible = sequence.iloc[-1].values
+            
+            rnn_features.append(features)
+            rnn_cibles.append(cible)
+        
+        self.rnn_features = rnn_features
+        self.rnn_cibles = rnn_cibles           
+        
+    # cree le RNN
+    def modelisation_rnn(self, location:str, cible:str):
+        print (time.ctime())      
+
+        print (f'\n -------\nModelisation de {cible} avec un RNN\n -------\n')
+        i_temps_debut=time.time()
+        
+        self._modelisation_preparation_rnn(location, cible)
+
+        modele = Sequential()
+
+        num_features = 1
+        #num_features = self.Xy.shape[1]
+
+#        modele.add(LSTM(50, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, self.Xy.shape[1])))
+        modele.add(LSTM(30, activation='relu', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+        #modele.add(Dropout(.1))
+        modele.add(LSTM(10, activation='relu'))
+#        modele.add(Dense(self.Xy.shape[1]))
+        modele.add(Dense(1))
+        opt = Adam(lr=1e-4)
+        modele.compile(optimizer=opt, loss='mse')
+        
+        print (modele.summary())
+        #modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
+
+        #history = modele.fit(self.X_train, self.y_train, epochs=10, batch_size=128, validation_split=.2, verbose=1)
+        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=50, verbose=1, validation_data=self.rnn_validation_generator)
+
+        self.modele=modele
+        self.history=history
+
+        
+
+        train_pred = modele.predict(self.rnn_train_generator)
+        train_pred = np.repeat(train_pred, self.Xy.shape[1], axis=-1)
+        self.train_pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(train_pred), columns=self.Xy.columns)[cible]
+        self.train_pred_unscaled.index = self.Xy[self.rnn_sequence_longueur:self.indice_coupure_1].index
+
+        validation_pred = modele.predict(self.rnn_validation_generator)
+        validation_pred = np.repeat(validation_pred, self.Xy.shape[1], axis=-1)
+        self.validation_pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(validation_pred), columns=self.Xy.columns)[cible]
+        self.validation_pred_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_2].index
+
+        train_orig_unscaled = pd.DataFrame(columns=self.Xy.columns).astype(self.Xy.dtypes.to_dict())
+        train_orig_unscaled[cible] = self.X_train.iloc[self.rnn_sequence_longueur:]
+        self.train_orig_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(train_orig_unscaled), columns=self.Xy.columns)[cible]
+        self.train_orig_unscaled.index = self.Xy[self.rnn_sequence_longueur:self.indice_coupure_1].index
+
+        validation_orig_unscaled = pd.DataFrame(columns=self.Xy.columns).astype(self.Xy.dtypes.to_dict())
+        validation_orig_unscaled[cible] = self.X_validation.iloc[self.rnn_sequence_longueur:]
+        self.validation_orig_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(validation_orig_unscaled), columns=self.Xy.columns)[cible]
+        self.validation_orig_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_2].index
+
+        plt.figure(figsize=(150, 6))
+        plt.plot(self.train_orig_unscaled, label="Train Orig", alpha=.75)
+        plt.plot(self.train_pred_unscaled, label="Train Pred", alpha=.75)
+        plt.plot(self.validation_orig_unscaled, label="Val Orig", alpha=.75)
+        plt.plot(self.validation_pred_unscaled, label="Val Pred", alpha=.75)
+        plt.legend()
+        plt.show();
+
+
+        print ("RMSE Train: ",np.sqrt(mean_squared_error(self.train_orig_unscaled, self.train_pred_unscaled)))
+        print ("RMSE Valid: ",np.sqrt(mean_squared_error(self.validation_orig_unscaled, self.validation_pred_unscaled)))
+#        test_pred = np.repeat(test_pred, self.Xy.shape[1], axis=-1)       
+#        test_pred = modele.predict(self.rnn_test_generator)
+        
+        
+        nom_modele = self.titre_graphe(nom_modele="RNN", location=location, hp="")
+        
+        plt.figure(figsize=(16, 6))
+        plt.plot(history.history['val_loss'], "g", label="MSE (Val)")
+        plt.plot(history.history['loss'], "b", label="MSE (Train)")
+        #plt.ylim((.5,.85))
+        plt.legend()
+        plt.xlabel("Epochs")
+        plt.ylabel("MSE")
+        plt.title(f"Historique de MSE- \nRNN")
+        plt.show();
+        """        
+        self.test_pred = modele.predict(self.X_test)
+        self.test_pred_class = self.test_pred>.5
+        
+        print(classification_report(self.y_test, self.test_pred_class))
+        print (confusion_matrix(self.y_test, self.test_pred_class))
+
+        print(modele.evaluate(self.X_test, self.y_test))
+
+        i_fin_completes=time.time()
+        print (" Temps comp: {:.2f} minutes".format( (i_fin_completes-i_temps_debut)/60))
+        
+        self.trace_courbe_roc_dnn(self.test_pred, nom_modele)
+        """        
+        print (time.ctime())
+        
+    def prediction2016_rnn(self, cible:str="MaxTemp", nb_prev:int=30):
+        if self.rnn_batch_size>1:
+            print ("Il faut que le batch_size soit à 1 pour pouvoir faire la prediction increntale")
+            return
+        
+        pred =[]
+        reel = []
+        
+        X = self.rnn_validation_generator[0][0]
+        y = self.rnn_validation_generator[0][1][0]
+        y_pred = self.modele.predict(X)[0][0]
+        pred.append(y_pred)
+        reel.append(y)
+        
+        for i in range(nb_prev):
+            # decale d'un jour la fenetre en ajoutant la derniere prediction
+            X = X[0][1:]
+            X = np.append(X,y_pred)
+            X = X.reshape(1,-1)
+            y_pred = self.modele.predict(X)[0][0]
+            pred.append(y_pred)
+            y_reel = self.rnn_validation_generator[i+1][1][0]
+            reel.append(y_reel)
+            print (i, y_pred, y_reel, X)
+            
+        self.rnn_pred2016_pred = pred
+        self.rnn_pred2016_orig = reel
+        
+        pred_xtend = np.repeat(np.array(pred).reshape(len(pred),1), self.Xy.shape[1], axis=-1)
+        pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(pred_xtend), columns=self.Xy.columns)[cible]
+        pred_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_1+self.rnn_sequence_longueur+nb_prev+1].index
+        
+        reel_xtend = np.repeat(np.array(reel).reshape(len(reel),1), self.Xy.shape[1], axis=-1)
+        reel_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(reel_xtend), columns=self.Xy.columns)[cible]
+        reel_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_1+self.rnn_sequence_longueur+nb_prev+1].index
+        
+        plt.figure(figsize=(16, 6))
+        plt.plot(pred_unscaled, label="Predictions incrémentales")
+        plt.plot(reel_unscaled, label="Donnees reelles")
+        plt.legend()
+        plt.title("Prediction des températures pour 2016")
+        plt.show();
+        
+        print ("RMSE Valid: ",np.sqrt(mean_squared_error(reel_unscaled, pred_unscaled)))
+    
+    # --------
+    #  entraine des modeles sur 365 jours de prediction de Rain_J
+    # --------   
         
     # determine les pvalue pour chaque jour de prediction dans le futur afin de determiner le nb de journées possibles de predictions pour une location donnee
     def entraine_rainj_location(self, locations:list):
@@ -221,15 +502,172 @@ class ProjetAustralieModelisation:
         pv_05 = self.verification_significativite(y_test_Loc, y_test_pred)
         pv_best = self.verification_significativite(y_test_Loc, y_test_pred_seuil)
         
-        self.resultats_rainj_climat_location.loc[len(self.resultats_rainj_climat_location)] = [J, location, pv_05, pv_best, 2, res_acc_train_seuil, res_acc_test_seuil, res_recall_test_seuil]
+        self.resultats_rainj_climat_location.loc[len(self.resultats_rainj_climat_location)] = [J, location, pv_05, pv_best, 2, res_acc_train_seuil, res_acc_test_seuil, res_recall_test_seuil]                 
         
-            
+    # enregistre dans un DF les performances du modele
+    def performance_modele(self, climat:int="", location:str=""):
+        if not hasattr(self, "resultats_modeles"):
+            self.resultats_modeles = pd.DataFrame(columns=["Climat", "Location", "Seuil", "pvalue05", "pvaluebest", "AccuracyTrain", "AccuracyTest", "RecallTest", "PrecisionTest", "F1Test", "AUC"])
+        pv_05, pv_best = self.verification_significativite_modele()
+        self.resultats_modeles.loc[len(self.resultats_modeles)] = [climat, location, self.res_roc_best_seuil, pv_05, pv_best, self.res_acc_train_seuil, self.res_acc_test_seuil, self.res_recall_test_seuil, self.res_precision_test_seuil, self.res_f1_test_seuil, self.res_roc_auc]
+        self.resultats_modeles.loc[len(self.resultats_modeles)] = [climat, location, .5, pv_05, pv_best, self.res_acc_train, self.res_acc_test, self.res_recall_test, self.res_precision_test, self.res_f1_test, self.res_roc_auc]
+        
+    def performance_modeles(self, modele_micro:bool=False, modele_climat:bool=False):
+        if not hasattr(self, "resultats_modeles"):
+            self.resultats_modeles = pd.DataFrame(columns=["Climat", "Location", "Seuil", "pvalue05", "pvaluebest", "AccuracyTrain", "AccuracyTest", "RecallTest", "PrecisionTest", "F1Test", "AUC"])
+
+        if modele_micro:
+            for location in self.data.Location.unique():
+                print ("\n\nLocation ", location,"\n\n")
+                self.modelisation(location=location, gs=True)
+                self.performance_modele("", location)
+                self.affiche_feature_importance(f"{location}")
+
+        if modele_climat:
+            for climat in self.data.Climat.unique():
+                print ("\n\nClimat ", climat,"\n\n")
+                self.modelisation(climat=climat, gs=True)
+                self.performance_modele(climat, "")
+                self.affiche_feature_importance(f"climat {climat} ({self.lib_climats[climat]})")
+       
+    # applique modele actuel sur une location donnée
+    def applique_sur_location(self, location:str):
+        xt=self.X_train[self.X_train_Location==location]
+        yt=self.y_train[self.X_train_Location==location]
+        y_predt = self.modele.predict(xt)
+        print("Acc train", accuracy_score(yt, y_predt))
+        
+        
+        x=self.X_test[self.X_test_Location==location]
+        y=self.y_test[self.X_test_Location==location]
+        y_pred = self.modele.predict(x)
+        
+        print("Acc ", accuracy_score(y, y_pred))
+        print("Rec ", recall_score(y, y_pred))
+        print("Pre ", precision_score(y, y_pred))
+        print("F1 ", f1_score(y, y_pred))
+        y_test_pred_proba = self.modele.predict_proba(x)
+        fpr, tpr, thresholds = roc_curve(y, y_test_pred_proba[:,1])
+        roc_auc = auc(fpr, tpr)
+        print("AUC ", roc_auc)
+        
+        self.affiche_feature_importance()
+       
+    # affiche feature importance
+    def affiche_feature_importance(self, libelle:str=""):
+        # affiche feature importance
+        plt.figure(figsize=(6,8))
+        sorted_idx = self.modele.feature_importances_.argsort()
+        plt.barh(self.X.columns[sorted_idx], self.modele.feature_importances_[sorted_idx])
+        
+        lib = "Feature Importance"
+        if libelle!="":
+           lib +=" pour "+libelle
+        plt.xlabel(lib)
+        plt.show();
+        
+    # entraine toutes les zones climatiques
     def entraine_rainj_tous_climats(self):
         self.resultats_rainj_climat = pd.DataFrame(columns=["J", "Climat", "pvalue05", "pvaluebest", "AUC", "AccuracyTrain", "AccuracyTest", "RecallTest"])
         self.resultats_rainj_climat_location = pd.DataFrame(columns=["J", "Location", "pvalue05", "pvaluebest", "AUC", "AccuracyTrain", "AccuracyTest", "RecallTest"])
         for i in np.sort(self.data.Climat.unique()):
             self.entraine_rainj_climat(i)
         
+        
+    # predictions sur l'année 2016 pour une location
+    def predictions2016(self, location:str, climat:int, modele_micro:bool=False, modele_climat:bool=False):
+        liste_y = []
+        liste_y_pred = []
+        liste_y_pred_seuil = []             
+        liste_y_pred_proba = []             
+        
+        dates = pd.date_range(start='2016-01-04', end='2016-12-31', freq='D')        
+        j_decalage = 3 # pour partir un peu plus loin que le 1er janvier (penser à maj le libellé ci-dessus)
+        
+        for i in range(360):
+            if modele_micro:
+                self.modelisation(cible=f"Rain_J_{i+1:02d}", location=location, gs=False, cut2016=True)            
+            else:
+                self.modelisation(cible=f"Rain_J_{i+1:02d}", climat=climat, gs=False, cut2016=True)            
+
+            X0 = self.X_2016[self.X_2016_Location == location][j_decalage]
+            y0 = self.y_2016[self.X_2016_Location == location][j_decalage]
+            liste_y.append(y0)
+
+            y_pred_proba = self.modele.predict_proba(pd.DataFrame(X0).T)[:,1][0] # on predit chaque fois à partir de la meme date
+            liste_y_pred_proba.append(y_pred_proba)
+            liste_y_pred.append((y_pred_proba >= .5))
+            liste_y_pred_seuil.append((y_pred_proba >= self.res_roc_best_seuil))
+            
+            self.liste_y = liste_y
+            self.liste_y_pred = liste_y_pred
+            self.liste_y_pred_seuil = liste_y_pred_seuil
+            self.liste_y_pred_proba = liste_y_pred_proba
+            
+            
+        print(confusion_matrix(liste_y, liste_y_pred))
+        conf_seuil = confusion_matrix(liste_y, liste_y_pred_seuil)
+        print(conf_seuil)
+
+        print ("Accuracy:")
+        acc_seuil = accuracy_score(liste_y, liste_y_pred_seuil)
+        print(accuracy_score(liste_y, liste_y_pred))
+        print(acc_seuil)
+
+        print ("Recall:")
+        rec_seuil = recall_score(liste_y, liste_y_pred_seuil)
+        print(recall_score(liste_y, liste_y_pred))
+        print(rec_seuil)
+        
+        print ("X²:")
+        x2_seuil = self.verification_significativite(liste_y, liste_y_pred_seuil)
+        print (self.verification_significativite(liste_y, liste_y_pred))
+        print (x2_seuil)
+            
+        plt.figure(figsize=(40,3))
+        plt.plot(dates.values[0:len(liste_y)], liste_y, label="Reel", color="#F00")
+        plt.plot(dates.values[0:len(liste_y)], liste_y_pred_seuil, label="Predictions seuil optimal", color="#0F0")
+        #plt.plot(liste_y_pred, label="Predictions standard", color="#070")
+        plt.plot(dates.values[0:len(liste_y)], liste_y_pred_proba, label="Probablité de pluie", color="#00F")
+        plt.axhline(self.res_roc_best_seuil, color = '#AAA', linestyle = '--')
+        plt.legend()
+        plt.title(f"{location}, climat {climat} ({self.lib_climats[climat]}) - p-value X²: {x2_seuil:.3f} - Taux de jours de pluies : {(np.sum(liste_y)/len(liste_y)):.3f} - Accuracy: {acc_seuil:.3f} - Recall: {rec_seuil:.3f}\nMatrice de confusion:\n {conf_seuil}")
+        plt.show();
+        
+        
+    
+    # predictions sur l'année 2016 pour une location
+    # nope: là, on predit Rain_J pour toute l'année 2016. ce n'est pas ce que je veux faire
+    def nope_predictions2016(self, location:str):
+        X = self.X_2016[self.X_2016_Location == location]
+        y = self.y_2016[self.X_2016_Location == location]
+
+        y_pred_proba = self.modele.predict_proba(X)
+        y_pred = y_pred_proba[:,1] >= .5
+        y_pred_seuil = y_pred_proba[:,1] >= self.res_roc_best_seuil
+        
+        plt.figure(figsize=(40,2))
+        plt.plot(y, label="Reel", color="#F00")
+        plt.plot(y_pred_seuil, label="Predictions seuil optimal", color="#0F0")
+        plt.plot(y_pred, label="Predictions standard", color="#070")
+        plt.legend()
+        plt.show();
+        
+        print(confusion_matrix(y, y_pred))
+        print(confusion_matrix(y, y_pred_seuil))
+
+        print(accuracy_score(y, y_pred))
+        print(accuracy_score(y, y_pred_seuil))
+
+        print(recall_score(y, y_pred))
+        print(recall_score(y, y_pred_seuil))
+
+        
+    # --------------
+    #    affichage de resultats
+    # ---------------
+    
+    # affiche les variables de performances pour une zone climatique
     def affiche_pvalue_rainj_climats(self):
         self.resultats_rainj_climat = pd.read_csv("resultats_rainj_climat.csv")
         
@@ -248,7 +686,7 @@ class ProjetAustralieModelisation:
             num_ax+=1
         plt.show();
         
-        
+    # affiche les variables de performances pour une zone climatique
     def affiche_perfs_rainj_climats(self):
         self.resultats_rainj_climat = pd.read_csv("resultats_rainj_climat.csv")
         
@@ -273,18 +711,22 @@ class ProjetAustralieModelisation:
             num_ax+=1
         plt.show();
 
-    def affiche_pvalue_rainj_locations(self, locations:list=[], data=None):
+    # affiche les pvalue pour une liste de locations, selon un modele choisi
+    def affiche_pvalue_rainj_locations(self, locations:list=[], data=None, modele_micro:bool=False, modele_climat:bool=False, climat:int=0):
         #self.resultats_rainj_location = pd.read_csv("resultats_rainj_location.csv")
-        
+
         if data is None:
-            data = pd.read_csv("resultats_rainj_location.csv")
+            if modele_micro:
+                data = pd.read_csv("resultats_rainj_location.csv")
+            if modele_climat:
+                data = pd.read_csv("resultats_rainj_climat_location.csv")
         
         if len(locations)>0:
             liste = locations
         else:
-            liste = data.Location.unique()
+            liste = self.data[self.data.Climat==climat].Location.unique()
 
-        figure, ax = plt.subplots(len(liste), 1, figsize=(25,20))
+        figure, ax = plt.subplots(len(liste), 1, figsize=(25, len(liste)*4))
         xtick = [*range(1,8), *range(8,365,7)]
         num_ax=0
         
@@ -296,23 +738,36 @@ class ProjetAustralieModelisation:
             ax[num_ax].axhline(.05, color = 'r', linestyle = '--')
             ax[num_ax].set_xticks(xtick)
             ax[num_ax].legend(loc="upper right")
+            ax[num_ax].set_ylim(-0.05,1.05)
 
             num_ax+=1
+            
+        if modele_climat:
+            modele_lib = "Modélisation par zone climatique"
+        if modele_micro:
+            modele_lib = "Modélisation par location"
+            
+        if len(locations)==0:
+            plt.suptitle(f"P-Value pour la zone de climat {climat} ({self.lib_climats[climat]})\n{modele_lib}", fontsize='xx-large')
         plt.show();
         
         
-    def affiche_perfs_rainj_locations(self, locations:list=[], data=None):
+    # affiche les variables de performances pour une liste de locations, selon un modele choisi
+    def affiche_perfs_rainj_locations(self, locations:list=[], data=None, modele_micro:bool=False, modele_climat:bool=False, climat:int=0):
         #self.resultats_rainj_location = pd.read_csv("resultats_rainj_location.csv")
-        if data is None:
-            data = pd.read_csv("resultats_rainj_location.csv")
 
+        if data is None:
+            if modele_micro:
+                data = pd.read_csv("resultats_rainj_location.csv")
+            if modele_climat:
+                data = pd.read_csv("resultats_rainj_climat_location.csv")
         
         if len(locations)>0:
             liste = locations
         else:
-            liste = data.Location.unique()
+            liste = self.data[self.data.Climat==climat].Location.unique()
         
-        figure, ax = plt.subplots(len(liste), 1, figsize=(25,20))
+        figure, ax = plt.subplots(len(liste), 1, figsize=(25, len(liste)*4))
         #figure, ax = plt.subplots(self.resultats_rainj_climat.Climat.nunique()+1, 1, figsize=(25,20))
         
         xtick = [*range(1,8), *range(8,365,7)]
@@ -325,13 +780,24 @@ class ProjetAustralieModelisation:
             ax[num_ax].plot(data[data.Location==i].J.values, data[data.Location==i].RecallTest.values, label="Recall (test)")
             #ax[num_ax].plot(data[data.Location==i].J.values, data[data.Location==i].AUC.values, label="AUC")
             ax[num_ax].set_title(f"Variables de Performances pour {i}")
-            ax[num_ax].axhline(.6, color = '#666', linestyle = '--')
-            ax[num_ax].axhline(.55, color = '#666', linestyle = '--')
-            ax[num_ax].axhline(.5, color = '#666', linestyle = '--')
+            ax[num_ax].axhline(.9, color = '#aaa', linestyle = '--')
+            ax[num_ax].axhline(.8, color = '#aaa', linestyle = '--')
+            ax[num_ax].axhline(.7, color = '#aaa', linestyle = '--')
+            ax[num_ax].axhline(.6, color = '#aaa', linestyle = '--')
+            ax[num_ax].axhline(.5, color = '#555', linestyle = '--')
             ax[num_ax].set_xticks(xtick)
             ax[num_ax].legend(loc="upper right")
+            ax[num_ax].set_ylim(-0.05,1.05)
 
             num_ax+=1
+
+        if modele_climat:
+            modele_lib = "Modélisation par zone climatique"
+        if modele_micro:
+            modele_lib = "Modélisation par location"
+
+        if len(locations)==0:
+            plt.suptitle(f"Variables de Performances pour la zone de climat {climat} ({self.lib_climats[climat]})\n{modele_lib}", fontsize='xx-large')
         plt.show();
 
     # ---
@@ -339,13 +805,14 @@ class ProjetAustralieModelisation:
     # affiche variables explicatives de shap
     # ---
     def predit(self, date:str):
-        X = self.X[self.X.index==date]
+        X = self.X[self.y.index==date]
         y = self.y[self.y.index==date]
 
-        if self.scaler!=None:
-            X = self.scaler.transform(X)
+        # deja scalé lors de la preparation
+        #if self.scaler!=None:
+        #    X = self.scaler.transform(X)
             
-        y_pred = self.modele.predict_proba(X)>=self.res_roc_best_seuil
+        y_pred = self.modele.predict_proba(X)[:,1]>=self.res_roc_best_seuil
 
         dict_pluie={0:'Pas de pluie', 1:'Pluie'}
         
@@ -372,6 +839,10 @@ class ProjetAustralieModelisation:
         for i in range(1,31):
             self.predit(f"2010-09-{i:02d}")
         
+    # -------
+    #  verification de significative des predictions
+    # -------   
+        
     # fais un test de Chi2 pour verifier significativite des resultats
     def verification_significativite(self, y_reel, y_pred):
         from scipy.stats import chi2_contingency
@@ -388,13 +859,28 @@ class ProjetAustralieModelisation:
         pvalbest = self.verification_significativite(self.y_test, y_pred_proba[:,1] >= self.res_roc_best_seuil)
         
         return (pval05, pvalbest)
-        
+     
+    # affiche matrice de prediction d'un modele
     def _modelisation_matrice_confusion(self, modele):
         y_pred = modele.predict(self.X_test)
         print(pd.crosstab(self.y_test, y_pred, rownames=['Classe réelle'], colnames=['Classe prédite']))
         
+    # verifie la significative de toutes les locations
+    def verifice_significativite_micro(self):
+        couple_loc_cli = self.data[["Location", "Climat"]].drop_duplicates()
+        couple_loc_cli_triee = couple_loc_cli.sort_values(["Climat", "Location"])
+        couple_loc_cli_triee.apply(lambda row:self.predictions2016(climat=row.Climat, location=row.Location, modele_micro=True), axis=1)
+        #self.verification_significativite(self.y_test, self.y_test)        
         
-    def modelisation(self, nom_modele:str="XGBoost", cible:str="RainTomorrow", gs:bool=True, climat:int=None, location:str="", totalite:bool=True):
+    # --------------------------------
+    # --------------------------------
+    # --------------------------------
+    #  modelisation: fonction la plus importante du module
+    # --------------------------------
+    # --------------------------------
+    # --------------------------------
+    
+    def modelisation(self, nom_modele:str="XGBoost", cible:str="RainTomorrow", gs:bool=True, climat:int=None, location:str="", totalite:bool=True, cut2016:bool=False):
                
         # seules les variables débutant par Rain impliquent de la classification, sauf Rainfall
         est_classification = cible.startswith("Rain") and not cible.startswith("Rainfall")
@@ -409,7 +895,7 @@ class ProjetAustralieModelisation:
         print (f'\n -------\nModelisation de {cible} avec un {nom_modele}\n -------\n')
         i_temps_debut=time.time()
         
-        self._modelisation_preparation(cible, True, climat, location)
+        self._modelisation_preparation(cible, True, climat, location, cut2016=cut2016)
         
         
         if nom_modele=='KNeighborsClassifier':
@@ -445,11 +931,28 @@ class ProjetAustralieModelisation:
         elif nom_modele=='XGBoost':
             if est_classification:
                 existe_proba=True
-                modele=xgb.XGBClassifier(random_state=0, learning_rate=.1, n_estimators=100, max_depth=4) 
-                param_modele={ 'learning_rate': [0.1, 0.01, 0.001],
-                              'n_estimators': [5, 10, 15, 20, 25],#, 50],
-                              'max_depth': [3, 4, 5, 6],#, 7, 8, 9, 10],
+                modele=xgb.XGBClassifier(random_state=0, learning_rate=.23, n_estimators=50, max_depth=6) 
+
+                # modele global:
+                param_modele={ 'learning_rate': [.23],
+                              'n_estimators': [ 50],#, 50],
+                              'max_depth': [ 6],#, 7, 8, 9, 10],
                               }
+
+                # modele micro
+                if location !="":
+                    param_modele={ 'learning_rate': [.2],
+                                  'n_estimators': [ 10],#, 50],
+                                  'max_depth': [ 3],#, 7, 8, 9, 10],
+                                  }
+                
+                # modele climat
+                if climat!=None:
+                    param_modele={ 'learning_rate': [.2],
+                                  'n_estimators': [ 30],#, 50],
+                                  'max_depth': [ 4],#, 7, 8, 9, 10],
+                                  }               
+                
             else:
                 modele=xgb.XGBRegressor(random_state=0, learning_rate=.1, n_estimators=100, max_depth=4)
 
@@ -530,8 +1033,8 @@ class ProjetAustralieModelisation:
         # s'il s'agit de classfication:        
         if est_classification:
         
-            print ("Precision train: {:.2f}% - Temps train: {:.2f} minutes".format(modele.score(self.X_train, self.y_train)*100, (i_fin_train-i_temps_debut)/60))
-            print ("Precision test: {:.2f}% - Temps test: {:.2f} minutes".format(modele.score(self.X_test, self.y_test)*100, (i_fin_test-i_fin_train)/60))
+            print ("Accuracy train: {:.2f}% - Temps train: {:.2f} minutes".format(modele.score(self.X_train, self.y_train)*100, (i_fin_train-i_temps_debut)/60))
+            print ("Accuracy test: {:.2f}% - Temps test: {:.2f} minutes".format(modele.score(self.X_test, self.y_test)*100, (i_fin_test-i_fin_train)/60))
     #        print (f"\nScore F1: {f1_score(self.y_test, predictions):.2f} - Accuracy: {accuracy_score(self.y_test, predictions):.2f} - Recall: {recall_score(self.y_test, predictions):.2f} - Precision: {precision_score(self.y_test, predictions):.2f}\n")
             
             
@@ -565,7 +1068,8 @@ class ProjetAustralieModelisation:
                 
         print (time.ctime())
       
-    def modelisation_dnn(self, nom_modele:str="DNN", cible:str="RainTomorrow", gs:bool=True, climat:int=None, location:str="", totalite:bool=True):
+    # modelise un DNN
+    def modelisation_dnn(self, nom_modele:str="DNN", cible:str="RainTomorrow", gs:bool=True, climat:int=None, location:str="", totalite:bool=True, cut2016:bool=False):
         # seules les variables débutant par Rain impliquent de la classification, sauf Rainfall
         est_classification = cible.startswith("Rain") and not cible.startswith("Rainfall")
                 
@@ -574,11 +1078,12 @@ class ProjetAustralieModelisation:
         print (f'\n -------\nModelisation de {cible} avec un {nom_modele}\n -------\n')
         i_temps_debut=time.time()
         
-        self._modelisation_preparation(cible, True, climat, location)
+        self._modelisation_preparation(cible, True, climat, location, cut2016=cut2016)
 
         # fait egalement un MinMax pour que les valeurs soient entre 0 et 1
         minmax_scaler = MinMaxScaler()
         minmax_scaler.fit(self.X)
+        
         self.X_train=minmax_scaler.transform(self.X_train)
         self.X_test=minmax_scaler.transform(self.X_test)    
 
@@ -636,6 +1141,11 @@ class ProjetAustralieModelisation:
         
         print (time.ctime())
 
+    # --------
+    # courbes ROC
+    # --------
+
+    # trace la courbe roc d'un DNN
     def trace_courbe_roc_dnn(self, y_pred_proba, titre_graphe:str=""):
         fpr, tpr, thresholds = roc_curve(self.y_test, y_pred_proba)
         roc_auc = auc(fpr, tpr)
@@ -652,7 +1162,7 @@ class ProjetAustralieModelisation:
         tpr_05=tpr[i_05]     
         
         plt.figure(figsize=(12, 9))
-        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'AUC = {roc_auc:.2f})')
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'AUC = {roc_auc:.4f})')
         plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
         plt.plot(fpr[best_i_seuil], tpr[best_i_seuil], 'ro', markersize=8, label=f'Seuil Optimal = {best_seuil:.2f}')
         plt.plot(fpr[i_05], tpr[i_05], 'ko', markersize=8, label=f'Seuil par défaut = 0.5')
@@ -667,7 +1177,7 @@ class ProjetAustralieModelisation:
         plt.legend(loc='lower right')
         plt.show()
         
-        
+    # trace la courbe roc d'un modele standard        
     def trace_courbe_roc(self, modele, titre_graphe:str=""):
         y_test_pred_proba = modele.predict_proba(self.X_test)
         fpr, tpr, thresholds = roc_curve(self.y_test, y_test_pred_proba[:,1])
@@ -685,8 +1195,9 @@ class ProjetAustralieModelisation:
         fpr_05=fpr[i_05]
         tpr_05=tpr[i_05]     
         
+        # commenter ou afficher selon si je veux ou non appeler entrainer massivement des modeles
         plt.figure(figsize=(12, 9))
-        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'AUC = {roc_auc:.2f})')
+        plt.plot(fpr, tpr, color='darkorange', lw=2, label=f'AUC = {roc_auc:.4f})')
         plt.plot([0, 1], [0, 1], color='navy', lw=2, linestyle='--')
         plt.plot(fpr[best_i_seuil], tpr[best_i_seuil], 'ro', markersize=8, label=f'Seuil Optimal = {best_seuil:.2f}')
         plt.plot(fpr[i_05], tpr[i_05], 'ko', markersize=8, label=f'Seuil par défaut = 0.5')
@@ -702,24 +1213,36 @@ class ProjetAustralieModelisation:
         plt.show()
         
         y_pred_seuil = modele.predict_proba(self.X_test)[:,1] >= best_seuil       
+        y_pred = modele.predict(self.X_test)
         
         self.res_acc_test_seuil = accuracy_score(self.y_test, y_pred_seuil)
         self.res_recall_test_seuil = recall_score(self.y_test, y_pred_seuil)
-        
+        self.res_precision_test_seuil = precision_score(self.y_test, y_pred_seuil)
+        self.res_f1_test_seuil = f1_score(self.y_test, y_pred_seuil)
+
+        self.res_acc_test = accuracy_score(self.y_test, y_pred)
+        self.res_recall_test = recall_score(self.y_test, y_pred)
+        self.res_precision_test = precision_score(self.y_test, y_pred)
+        self.res_f1_test = f1_score(self.y_test, y_pred)
+
         # calcul aussi sur le train pour s'assurer qu'il n'y ait pas d'overfit
         y_train_pred_seuil = modele.predict_proba(self.X_train)[:,1] >= best_seuil       
         self.res_acc_train_seuil = accuracy_score(self.y_train, y_train_pred_seuil)
+        y_train_pred = modele.predict(self.X_train)
+        self.res_acc_train = accuracy_score(self.y_train, y_train_pred)
         
+        print (f"\nAvec seuil par défaut:\nScore F1: {self.res_f1_test:.4f} - Accuracy: {self.res_acc_test:.4f} - Recall: {self.res_recall_test:.4f} - Precision: {self.res_precision_test:.4f}\n")
         
-        print (f"\nScore F1: {f1_score(self.y_test, y_pred_seuil):.2f} - Accuracy: {self.res_acc_test_seuil:.2f} - Recall: {self.res_recall_test_seuil:.2f} - Precision: {precision_score(self.y_test, y_pred_seuil):.2f}\n")
+        print (f"\nAvec seuil optimisé:\nScore F1: {self.res_f1_test_seuil:.4f} - Accuracy: {self.res_acc_test_seuil:.4f} - Recall: {self.res_recall_test_seuil:.4f} - Precision: {self.res_precision_test_seuil:.4f}\n")
         print (f"Matrice de confusion avec seuil de {best_seuil:.2f}:")
         print(pd.crosstab(self.y_test, y_pred_seuil, rownames=['Classe réelle'], colnames=['Classe prédite']))
 
         print(classification_report_imbalanced(self.y_test, y_pred_seuil))
 
+    # deduit le titre d'un graphe selon les pricipales variables
     def titre_graphe(self, nom_modele:str, hp:str, climat:int=None, location:str="", cible:str=""):
         titre_clim_loc=""        
-        if climat!=None:
+        if climat is not None:
             titre_clim_loc="\nClimat: "+str(climat)+" ("+self.lib_climats[climat]+")"
         if location!="":
             titre_clim_loc="\nLocation: "+location
@@ -922,7 +1445,7 @@ class ProjetAustralieModelisation:
         # =============================================================================================
         
         list_variables = ["Humidity3pm", "Pressure3pm", "WindGustSpeed", "Sunshine", "RainToday", "Rainfall", "MaxTemp", 
-                          "AmplitudeTemp", "SaisonCos", "Climat_0", "Climat_1", "Climat_2", "Climat_3", "Climat_4", "Climat_6",
+                          "AmplitudeTemp", "SaisonCos4pi", "SaisonCos2pi", "Climat_0", "Climat_1", "Climat_2", "Climat_3", "Climat_4", "Climat_6",
                           "WindGustDir_X", "WindGustDir_Y"
                           ]
 #        for variable in list_variables:
@@ -1051,6 +1574,8 @@ class ProjetAustralieModelisation:
         fig.show(renderer='browser')      
 
 #source = pd.read_csv("data_process4_knnim_resample_J365.csv", index_col=0)
+#source = pd.read_csv("data_process3_knnim_resample_J2.csv", index_col=0)
+#source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
 
 #pm = ProjetAustralieModelisation(pd.read_csv("data_basique.csv", index_col=0))
 pm = ProjetAustralieModelisation(source)
@@ -1061,3 +1586,4 @@ pm = ProjetAustralieModelisation(source)
 # data_process_non_knnim => preprocession avancée (mais sans knni ni reequilibrage des classes)
 # data_process4_knnim_resample_J365 => idem, mais 365j de prevision pour Rainfall, MaxTemp, RainToday. Knni SANS drop RainTomorrow (car plein de variables cibles possibles), SaisonCos
 # data_process3_knnim_resample_J2 => version light
+# data_process5_knnim_resample_J2 => dataset jusqu'au 25/6/17, ajout de SaisonCos2pi. Pas d'ajout des Rain_J
