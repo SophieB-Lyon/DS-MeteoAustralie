@@ -204,9 +204,9 @@ class ProjetAustralieModelisation:
                 self.X_2016 = self.scaler.transform(self.X_2016)
 
             
-        #oversample = RandomOverSampler()
+        oversample = RandomOverSampler()
         # pip install threadpoolctl==3.1.0  pour avoir SMOTE sur + de 15 colonnes
-        oversample = SMOTE()
+        #oversample = SMOTE()
         #X_train, y_train = oversample.fit_resample(X_train, y_train)          
             
             
@@ -938,6 +938,17 @@ class ProjetAustralieModelisation:
                               'n_estimators': [ 50],#, 50],
                               'max_depth': [ 6],#, 7, 8, 9, 10],
                               }
+
+                """
+                # best Quyen
+                param_modele={'max_depth': [9],
+                 'min_child_weight': [8.266409668869114],
+                 'subsample': [0.874748527185061],
+                 'reg_alpha': [6.968394128293252],
+                 'reg_lambda': [1.672170373377269],
+                 'gamma': [0.0073317410705931495],
+                 'learning_rate': [0.10186418984471239]}
+                """
 
                 # modele micro
                 if location !="":
