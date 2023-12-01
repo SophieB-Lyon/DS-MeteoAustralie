@@ -177,7 +177,7 @@ class ProjetAustralieModelisation:
             self.y=self.y[self.y.index<'2016-01-01']
             self.Xy = self.Xy[self.Xy.index<'2016-01-01']
 
-        X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=66) 
+        X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=66, stratify=self.y) 
 
         # on supprime la Location si elle est presente en str (utile uniquement pour filtrer en amont)
         #if hasattr(self.Xy, "Location"):
@@ -541,15 +541,18 @@ class ProjetAustralieModelisation:
         x=self.X_test[self.X_test_Location==location]
         y=self.y_test[self.X_test_Location==location]
         y_pred = self.modele.predict(x)
-        
-        print("Acc ", accuracy_score(y, y_pred))
-        print("Rec ", recall_score(y, y_pred))
-        print("Pre ", precision_score(y, y_pred))
-        print("F1 ", f1_score(y, y_pred))
+
         y_test_pred_proba = self.modele.predict_proba(x)
         fpr, tpr, thresholds = roc_curve(y, y_test_pred_proba[:,1])
         roc_auc = auc(fpr, tpr)
         print("AUC ", roc_auc)
+        
+        # scores            
+        print ("Seuil par défaut:")
+        self.scores_classification(y, y_test_pred_proba[:,1]>=.5)
+#        print ("\nSeuil optimal:")
+#        self.scores_classification(y, y_test_pred_proba[:,1]>=self.res_roc_best_seuil)
+        
         
         self.affiche_feature_importance()
        
@@ -871,7 +874,15 @@ class ProjetAustralieModelisation:
         couple_loc_cli_triee = couple_loc_cli.sort_values(["Climat", "Location"])
         couple_loc_cli_triee.apply(lambda row:self.predictions2016(climat=row.Climat, location=row.Location, modele_micro=True), axis=1)
         #self.verification_significativite(self.y_test, self.y_test)        
-        
+       
+    # affiche metriques de classification
+    def scores_classification(self, y_reel, y_pred):
+        print (f"\nMétriques de clasification :\nAccuracy: {accuracy_score(y_reel, y_pred):.4f} - Recall: {recall_score(y_reel, y_pred):.4f} - Precision: {precision_score(y_reel, y_pred):.4f} - Score F1: {f1_score(y_reel, y_pred):.4f}\n")
+        print ("Matrice de confusion :")
+        print(pd.crosstab(y_reel, y_pred, rownames=['Classe réelle'], colnames=['Classe prédite']))
+        print ("---------------------------------")
+
+       
     # --------------------------------
     # --------------------------------
     # --------------------------------
@@ -937,6 +948,7 @@ class ProjetAustralieModelisation:
                 param_modele={ 'learning_rate': [.23],
                               'n_estimators': [ 50],#, 50],
                               'max_depth': [ 6],#, 7, 8, 9, 10],
+                              'random_state':[0]
                               }
 
                 """
@@ -955,6 +967,7 @@ class ProjetAustralieModelisation:
                     param_modele={ 'learning_rate': [.2],
                                   'n_estimators': [ 10],#, 50],
                                   'max_depth': [ 3],#, 7, 8, 9, 10],
+                                  'random_state':[0]
                                   }
                 
                 # modele climat
@@ -962,6 +975,7 @@ class ProjetAustralieModelisation:
                     param_modele={ 'learning_rate': [.2],
                                   'n_estimators': [ 30],#, 50],
                                   'max_depth': [ 4],#, 7, 8, 9, 10],
+                                  'random_state':[0]
                                   }               
                 
             else:
@@ -1000,7 +1014,7 @@ class ProjetAustralieModelisation:
                         scoring='roc_auc',
                         verbose=0,
                         cv=outer_cv,
-                        n_jobs=-1                        
+                        n_jobs=-1
                         )
     
             gcv.fit(self.X_train, self.y_train)
@@ -1068,6 +1082,13 @@ class ProjetAustralieModelisation:
             print ("P-value pour Test de X² avec seuil par défaut de 0,5: ", self.verification_significativite(self.y_test, predictions))
             print (f"Test de X² avec seuil optimal ({self.res_roc_best_seuil:.2f}): ", self.verification_significativite(self.y_test, predictions_proba[:,1] >= self.res_roc_best_seuil))
 
+            # scores            
+            print ("Seuil par défaut:")
+            self.scores_classification(self.y_test, predictions_proba[:,1]>=.5)
+            print ("\nSeuil optimal:")
+            self.scores_classification(self.y_test, predictions_proba[:,1]>=self.res_roc_best_seuil)
+            
+
         # s'il s'agit de regression
         else:
             rmse = np.sqrt(mean_squared_error(self.y_test, predictions))
@@ -1130,7 +1151,7 @@ class ProjetAustralieModelisation:
         plt.figure(figsize=(16, 6))
         plt.plot(history.history['val_binary_accuracy'], "g", label="Accuracy (Val)")
         plt.plot(history.history['binary_accuracy'], "b", label="Accuracy (Train)")
-        plt.ylim((.5,.85))
+        plt.ylim((.7,.85))
         plt.legend()
         plt.xlabel("Epochs")
         plt.ylabel("Accuracy")
@@ -1149,6 +1170,11 @@ class ProjetAustralieModelisation:
         print (" Temps comp: {:.2f} minutes".format( (i_fin_completes-i_temps_debut)/60))
         
         self.trace_courbe_roc_dnn(self.test_pred, nom_modele)
+        
+        print ("Seuil par défaut:")
+        self.scores_classification(self.y_test, self.test_pred.reshape(-1)>=.5)
+        print ("\nSeuil optimal:")
+        self.scores_classification(self.y_test, self.test_pred.reshape(-1)>=self.res_roc_best_seuil)
         
         print (time.ctime())
 
@@ -1586,7 +1612,9 @@ class ProjetAustralieModelisation:
 
 #source = pd.read_csv("data_process4_knnim_resample_J365.csv", index_col=0)
 #source = pd.read_csv("data_process3_knnim_resample_J2.csv", index_col=0)
-#source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
+
+source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
+#source = pd.read_csv("data_basique_location.csv", index_col=0)
 
 #pm = ProjetAustralieModelisation(pd.read_csv("data_basique.csv", index_col=0))
 pm = ProjetAustralieModelisation(source)
