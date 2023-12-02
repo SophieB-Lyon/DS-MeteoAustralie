@@ -86,6 +86,12 @@ class ProjetAustralieModelisation:
         
         #self.data = self.data.drop(columns=["SaisonCos"])
         
+        # si SaisonCos existe, alors on la renomme en 4pi et on ajoute SaisonCos2pi
+        if hasattr(self.data, "SaisonCos"):
+            self.data = self.data.rename(columns={'SaisonCos':'SaisonCos4pi'})
+            self.data["SaisonCos2pi"] = np.cos(2*np.pi*(self.data.index.day_of_year-1)/365)
+
+        
         # s'il n'y a que mount ginini en climat 5, on degage
         if (self.data[self.data.Climat==5].Location.nunique()==1):
             self.data = self.data[self.data.Climat!=5]
@@ -220,6 +226,9 @@ class ProjetAustralieModelisation:
     def _modelisation_preparation_rnn(self, location:str, cible:str):
         
         # longueur des sequences
+#        self.rnn_sequence_longueur = 15
+#        self.rnn_batch_size = 1
+
         self.rnn_sequence_longueur = 15
         self.rnn_batch_size = 1
         
@@ -232,7 +241,7 @@ class ProjetAustralieModelisation:
         self.Xy = self.Xy.loc[:,~self.Xy.columns.str.startswith("Climat_")]
         # lat et lng sont identiques puisque meme Location: on droppe aussi
         # raintomorrow n'a pas non plus d'interet dans cette approche
-        self.Xy = self.Xy.drop(columns=["lat", "lng", "RainTomorrow"])
+        self.Xy = self.Xy.drop(columns=["lat", "lng"])#, "RainTomorrow"])
         
         
         self.scaler_rnn = preprocessing.MinMaxScaler().fit(self.Xy)
@@ -311,8 +320,8 @@ class ProjetAustralieModelisation:
         self.rnn_features = rnn_features
         self.rnn_cibles = rnn_cibles           
         
-    # cree le RNN
-    def modelisation_rnn(self, location:str, cible:str):
+    # cree un RNN de regression
+    def modelisation_rnn_reg(self, location:str, cible:str):
         print (time.ctime())      
 
         print (f'\n -------\nModelisation de {cible} avec un RNN\n -------\n')
@@ -338,19 +347,98 @@ class ProjetAustralieModelisation:
         #modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
 
         #history = modele.fit(self.X_train, self.y_train, epochs=10, batch_size=128, validation_split=.2, verbose=1)
-        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=50, verbose=1, validation_data=self.rnn_validation_generator)
+        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=3, verbose=1, validation_data=self.rnn_validation_generator)
 
         self.modele=modele
         self.history=history
 
+        print (time.ctime())
         
+        self.resultats_rnn(location, cible)
 
-        train_pred = modele.predict(self.rnn_train_generator)
+    # cree un RNN de classification
+    def modelisation_rnn_clf(self, location:str, cible:str):
+        print (time.ctime())      
+
+        print (f'\n -------\nModelisation de {cible} avec un RNN\n -------\n')
+        i_temps_debut=time.time()
+        
+        self._modelisation_preparation_rnn(location, cible)
+
+        modele = Sequential()
+
+        num_features = 1
+        #num_features = self.Xy.shape[1]
+
+#        modele.add(LSTM(50, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, self.Xy.shape[1])))
+        modele.add(LSTM(30, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+        #modele.add(Dropout(.1))
+        modele.add(LSTM(10, activation='tanh'))
+#        modele.add(Dense(self.Xy.shape[1]))
+        modele.add(Dense(1, activation='sigmoid'))
+        opt = Adam(lr=1e-4)
+        #modele.compile(optimizer=opt, loss='mse')
+        modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
+        
+        print (modele.summary())
+
+        #history = modele.fit(self.X_train, self.y_train, epochs=10, batch_size=128, validation_split=.2, verbose=1)
+        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=100, verbose=1, validation_data=self.rnn_validation_generator)
+
+        self.modele=modele
+        self.history=history
+
+        print (time.ctime())
+        
+        self.resultats_rnn_clf(location, cible)
+        
+    # affiche les resultats du RNN CLF entrainé
+    def resultats_rnn_clf(self, location:str="", cible:str="RainTomorrow"):
+        
+        nom_modele = self.titre_graphe("RNN", "", location=location, cible=cible)
+        
+        plt.figure(figsize=(16, 6))
+        plt.plot(self.history.history['val_binary_accuracy'], "g", label="Accuracy (Val)")
+        plt.plot(self.history.history['binary_accuracy'], "b", label="Accuracy (Train)")
+        plt.ylim((.2,.85))
+        plt.legend()
+        plt.xlabel("Epochs")
+        plt.ylabel("Accuracy")
+        plt.title(f"Historique d'Accuracy - \n{nom_modele}")
+        plt.show();
+
+        minmax = MinMaxScaler()
+
+        train_pred = self.modele.predict(self.rnn_train_generator)
+        train_pred = minmax.fit_transform(train_pred)
+
+        y_reel = self.y_train[self.rnn_sequence_longueur:]
+        y_pred_proba = train_pred.reshape(-1)
+        y_pred = y_pred_proba>.5
+
+        
+        print(classification_report(y_reel, y_pred))
+        print (confusion_matrix(y_reel, y_pred))
+
+        #print(self.modele.evaluate(self.X_test, self.y_test))
+        
+        self.trace_courbe_roc_ann(y_reel, y_pred, nom_modele)
+        
+        print ("Seuil par défaut:")
+        self.scores_classification(y_reel, y_pred)
+        #print ("\nSeuil optimal:")
+        #self.scores_classification(self.y_test, self.test_pred.reshape(-1)>=self.res_roc_best_seuil)
+        
+        print (time.ctime())
+        
+    # affiche les resultats du RNN entrainé
+    def resultats_rnn(self, location:str, cible:str):
+        train_pred = self.modele.predict(self.rnn_train_generator)
         train_pred = np.repeat(train_pred, self.Xy.shape[1], axis=-1)
         self.train_pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(train_pred), columns=self.Xy.columns)[cible]
         self.train_pred_unscaled.index = self.Xy[self.rnn_sequence_longueur:self.indice_coupure_1].index
 
-        validation_pred = modele.predict(self.rnn_validation_generator)
+        validation_pred = self.modele.predict(self.rnn_validation_generator)
         validation_pred = np.repeat(validation_pred, self.Xy.shape[1], axis=-1)
         self.validation_pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(validation_pred), columns=self.Xy.columns)[cible]
         self.validation_pred_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_2].index
@@ -365,7 +453,8 @@ class ProjetAustralieModelisation:
         self.validation_orig_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(validation_orig_unscaled), columns=self.Xy.columns)[cible]
         self.validation_orig_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_2].index
 
-        plt.figure(figsize=(150, 6))
+#☺        plt.figure(figsize=(150, 6))
+        plt.figure(figsize=(30, 6))
         plt.plot(self.train_orig_unscaled, label="Train Orig", alpha=.75)
         plt.plot(self.train_pred_unscaled, label="Train Pred", alpha=.75)
         plt.plot(self.validation_orig_unscaled, label="Val Orig", alpha=.75)
@@ -379,17 +468,16 @@ class ProjetAustralieModelisation:
 #        test_pred = np.repeat(test_pred, self.Xy.shape[1], axis=-1)       
 #        test_pred = modele.predict(self.rnn_test_generator)
         
-        
-        nom_modele = self.titre_graphe(nom_modele="RNN", location=location, hp="")
+        nom_modele = self.titre_graphe(nom_modele="RNN", location=location, cible=cible, hp="")
         
         plt.figure(figsize=(16, 6))
-        plt.plot(history.history['val_loss'], "g", label="MSE (Val)")
-        plt.plot(history.history['loss'], "b", label="MSE (Train)")
+        plt.plot(self.history.history['val_loss'], "g", label="MSE (Val)")
+        plt.plot(self.history.history['loss'], "b", label="MSE (Train)")
         #plt.ylim((.5,.85))
         plt.legend()
         plt.xlabel("Epochs")
         plt.ylabel("MSE")
-        plt.title(f"Historique de MSE- \nRNN")
+        plt.title(nom_modele)
         plt.show();
         """        
         self.test_pred = modele.predict(self.X_test)
@@ -455,6 +543,17 @@ class ProjetAustralieModelisation:
     # --------
     #  entraine des modeles sur 365 jours de prediction de Rain_J
     # --------   
+
+    # determine les pvalue pour chaque jour de prediction dans le futur afin de determiner le nb de journées possibles de predictions pour toute l'australie
+    def entraine_rainj_macro(self):
+        if not hasattr(self, "resultats_rainj_location"):
+            self.resultats_rainj_macro = pd.DataFrame(columns=["J", "seuil", "pvalue05", "pvaluebest", "AUC", "AccuracyTrain", "AccuracyTest", "RecallTest"])
+        
+        for i in range(1,365):
+            self.modelisation(cible=f"Rain_J_{i:02d}", gs=True)
+            pv_05, pv_best = self.verification_significativite_modele()
+            self.resultats_rainj_macro.loc[len(self.resultats_rainj_macro)] = [i, 1, pv_05, pv_best, self.res_roc_auc, self.res_acc_train_seuil, self.res_acc_test_seuil, self.res_recall_test_seuil]
+            self.resultats_rainj_macro.loc[len(self.resultats_rainj_macro)] = [i, 0, pv_05, pv_best, self.res_roc_auc, self.res_acc_train, self.res_acc_test, self.res_recall_test]
         
     # determine les pvalue pour chaque jour de prediction dans le futur afin de determiner le nb de journées possibles de predictions pour une location donnee
     def entraine_rainj_location(self, locations:list):
@@ -463,7 +562,7 @@ class ProjetAustralieModelisation:
         
         for location in locations:
             for i in range(1,365):
-                self.modelisation(cible=f"Rain_J_{i:02d}", location=location, gs=False)
+                self.modelisation(cible=f"Rain_J_{i:02d}", location=location, gs=True)
                 pv_05, pv_best = self.verification_significativite_modele()
                 self.resultats_rainj_location.loc[len(self.resultats_rainj_location)] = [i, location, pv_05, pv_best, self.res_roc_auc, self.res_acc_train_seuil, self.res_acc_test_seuil, self.res_recall_test_seuil]
 
@@ -477,7 +576,7 @@ class ProjetAustralieModelisation:
         liste_locations = self.data[self.data.Climat==climat].Location.unique()
         
         for i in range(1,365):
-            self.modelisation(cible=f"Rain_J_{i:02d}", climat=climat, gs=False)
+            self.modelisation(cible=f"Rain_J_{i:02d}", climat=climat, gs=True)
             pv_05, pv_best = self.verification_significativite_modele()
             self.resultats_rainj_climat.loc[len(self.resultats_rainj_climat)] = [i, climat, pv_05, pv_best, self.res_roc_auc, self.res_acc_train_seuil, self.res_acc_test_seuil, self.res_recall_test_seuil]
             
@@ -582,16 +681,19 @@ class ProjetAustralieModelisation:
         liste_y = []
         liste_y_pred = []
         liste_y_pred_seuil = []             
-        liste_y_pred_proba = []             
+        liste_y_pred_proba = []
+        liste_roc_best_seuil = []
         
         dates = pd.date_range(start='2016-01-04', end='2016-12-31', freq='D')        
         j_decalage = 3 # pour partir un peu plus loin que le 1er janvier (penser à maj le libellé ci-dessus)
         
         for i in range(360):
             if modele_micro:
-                self.modelisation(cible=f"Rain_J_{i+1:02d}", location=location, gs=False, cut2016=True)            
+                self.modelisation(cible=f"Rain_J_{i+1:02d}", location=location, gs=True, cut2016=True)            
+            elif modele_climat:
+                self.modelisation(cible=f"Rain_J_{i+1:02d}", climat=climat, gs=True, cut2016=True)            
             else:
-                self.modelisation(cible=f"Rain_J_{i+1:02d}", climat=climat, gs=False, cut2016=True)            
+                self.modelisation(cible=f"Rain_J_{i+1:02d}", gs=True, cut2016=True)            
 
             X0 = self.X_2016[self.X_2016_Location == location][j_decalage]
             y0 = self.y_2016[self.X_2016_Location == location][j_decalage]
@@ -601,6 +703,8 @@ class ProjetAustralieModelisation:
             liste_y_pred_proba.append(y_pred_proba)
             liste_y_pred.append((y_pred_proba >= .5))
             liste_y_pred_seuil.append((y_pred_proba >= self.res_roc_best_seuil))
+            
+            liste_roc_best_seuil.append(self.res_roc_best_seuil)
             
             self.liste_y = liste_y
             self.liste_y_pred = liste_y_pred
@@ -627,12 +731,15 @@ class ProjetAustralieModelisation:
         print (self.verification_significativite(liste_y, liste_y_pred))
         print (x2_seuil)
             
-        plt.figure(figsize=(40,3))
-        plt.plot(dates.values[0:len(liste_y)], liste_y, label="Reel", color="#F00")
-        plt.plot(dates.values[0:len(liste_y)], liste_y_pred_seuil, label="Predictions seuil optimal", color="#0F0")
+        plt.figure(figsize=(20,2))
+        plt.plot(dates.values[0:len(liste_y)], liste_y, label="Reel", color="#00F")
+        plt.plot(dates.values[0:len(liste_y)], liste_y_pred_seuil, label="Predictions", color="#0A0")
         #plt.plot(liste_y_pred, label="Predictions standard", color="#070")
-        plt.plot(dates.values[0:len(liste_y)], liste_y_pred_proba, label="Probablité de pluie", color="#00F")
-        plt.axhline(self.res_roc_best_seuil, color = '#AAA', linestyle = '--')
+        plt.plot(dates.values[0:len(liste_y)], liste_y_pred_proba, label="Probablité de pluie", color="#F40")
+        
+        plt.plot(dates.values[0:len(liste_y)], liste_roc_best_seuil, label="Seuil optimal", color="#BBB", linestyle="--")
+        
+        #plt.axhline(self.res_roc_best_seuil, color = '#AAA', linestyle = '--')
         plt.legend()
         plt.title(f"{location}, climat {climat} ({self.lib_climats[climat]}) - p-value X²: {x2_seuil:.3f} - Taux de jours de pluies : {(np.sum(liste_y)/len(liste_y)):.3f} - Accuracy: {acc_seuil:.3f} - Recall: {rec_seuil:.3f}\nMatrice de confusion:\n {conf_seuil}")
         plt.show();
@@ -670,6 +777,52 @@ class ProjetAustralieModelisation:
     #    affichage de resultats
     # ---------------
     
+    # affiche les variables de performances pour toute l'australie
+    def affiche_pvalue_rainj_macro(self, nbj=365):
+        self.resultats_rainj_macro = pd.read_csv("resultats_rainj_macro.csv")
+        
+        figure = plt.figure(figsize=(12,4))
+        xtick = [*range(1,16), *range(16,nbj,7)]
+
+        masque = (self.resultats_rainj_macro.seuil>.1) & (self.resultats_rainj_macro.J<=nbj)
+        
+        plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].pvalue05.values, label="p-value d'après prédictions selon seuil par défaut (0,5)")
+        plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].pvaluebest.values, label="p-value d'après prédictions selon seuil optimal")
+        plt.title("pvalues pour tout l'Australie")
+        plt.axhline(.05, color = 'r', linestyle = '--')
+        plt.xticks(xtick)
+        plt.legend(loc="upper right")
+
+        plt.show();
+
+    # affiche les variables de performances pour toute l'australie
+    def affiche_perfs_rainj_macro(self, nbj=365):
+        self.resultats_rainj_macro = pd.read_csv("resultats_rainj_macro.csv")
+        
+        figure = plt.figure(figsize=(8,4))
+        xtick = [*range(1,16), *range(16,nbj,7)]
+
+        masque = (self.resultats_rainj_macro.seuil<.1) & (self.resultats_rainj_macro.J<=nbj)
+
+        plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].AccuracyTrain.values, label="Accuracy (train)")
+        plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].AccuracyTest.values, label="Accuracy (test)")
+        plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].RecallTest.values, label="Recall (test)")
+        plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].AUC.values, label="AUC")
+        plt.title("Variables de Performances pour toute l'Australie\n(seuil par défaut)")
+        plt.axhline(.9, color = '#666', linestyle = '--')
+        plt.axhline(.8, color = '#666', linestyle = '--')
+        plt.axhline(.7, color = '#666', linestyle = '--')
+        plt.axhline(.6, color = '#666', linestyle = '--')
+        #ax[num_ax].axhline(.55, color = '#666', linestyle = '--')
+        plt.axhline(.5, color = '#666', linestyle = '--')
+        plt.xticks(xtick)
+        plt.legend(loc="upper right")
+        
+        plt.ylim(0,1)
+
+        plt.show();
+    
+    
     # affiche les variables de performances pour une zone climatique
     def affiche_pvalue_rainj_climats(self):
         self.resultats_rainj_climat = pd.read_csv("resultats_rainj_climat.csv")
@@ -705,8 +858,11 @@ class ProjetAustralieModelisation:
             ax[num_ax].plot(self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].J.values, self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].RecallTest.values, label="Recall (test)")
             ax[num_ax].plot(self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].J.values, self.resultats_rainj_climat[self.resultats_rainj_climat.Climat==i].AUC.values, label="AUC")
             ax[num_ax].set_title(f"Variables de Performances pour climat {i} ({self.lib_climats[i]})")
+            ax[num_ax].axhline(.9, color = '#666', linestyle = '--')
+            ax[num_ax].axhline(.8, color = '#666', linestyle = '--')
+            ax[num_ax].axhline(.7, color = '#666', linestyle = '--')
             ax[num_ax].axhline(.6, color = '#666', linestyle = '--')
-            ax[num_ax].axhline(.55, color = '#666', linestyle = '--')
+            #ax[num_ax].axhline(.55, color = '#666', linestyle = '--')
             ax[num_ax].axhline(.5, color = '#666', linestyle = '--')
             ax[num_ax].set_xticks(xtick)
             ax[num_ax].legend(loc="upper right")
@@ -1146,11 +1302,21 @@ class ProjetAustralieModelisation:
         self.modele=modele
         self.history=history
         
-        nom_modele = self.titre_graphe(nom_modele, "", climat, location, cible)
+        i_fin_completes=time.time()
+        print (" Temps comp: {:.2f} minutes".format( (i_fin_completes-i_temps_debut)/60))
+        
+        print (time.ctime())
+        self.resultats_dnn(climat, location, cible)
+        
+        
+    # affiche les resultats du DNN entrainé
+    def resultats_dnn(self, climat:int=None, location:str="", cible:str="RainTomorrow"):
+        
+        nom_modele = self.titre_graphe("DNN", "", climat, location, cible)
         
         plt.figure(figsize=(16, 6))
-        plt.plot(history.history['val_binary_accuracy'], "g", label="Accuracy (Val)")
-        plt.plot(history.history['binary_accuracy'], "b", label="Accuracy (Train)")
+        plt.plot(self.history.history['val_binary_accuracy'], "g", label="Accuracy (Val)")
+        plt.plot(self.history.history['binary_accuracy'], "b", label="Accuracy (Train)")
         plt.ylim((.7,.85))
         plt.legend()
         plt.xlabel("Epochs")
@@ -1158,18 +1324,15 @@ class ProjetAustralieModelisation:
         plt.title(f"Historique d'Accuracy - \n{nom_modele}")
         plt.show();
         
-        self.test_pred = modele.predict(self.X_test)
+        self.test_pred = self.modele.predict(self.X_test)
         self.test_pred_class = self.test_pred>.5
         
         print(classification_report(self.y_test, self.test_pred_class))
         print (confusion_matrix(self.y_test, self.test_pred_class))
 
-        print(modele.evaluate(self.X_test, self.y_test))
-
-        i_fin_completes=time.time()
-        print (" Temps comp: {:.2f} minutes".format( (i_fin_completes-i_temps_debut)/60))
+        print(self.modele.evaluate(self.X_test, self.y_test))
         
-        self.trace_courbe_roc_dnn(self.test_pred, nom_modele)
+        self.trace_courbe_roc_ann(self.y_test, self.test_pred, nom_modele)
         
         print ("Seuil par défaut:")
         self.scores_classification(self.y_test, self.test_pred.reshape(-1)>=.5)
@@ -1183,8 +1346,8 @@ class ProjetAustralieModelisation:
     # --------
 
     # trace la courbe roc d'un DNN
-    def trace_courbe_roc_dnn(self, y_pred_proba, titre_graphe:str=""):
-        fpr, tpr, thresholds = roc_curve(self.y_test, y_pred_proba)
+    def trace_courbe_roc_ann(self, y_reel, y_pred_proba, titre_graphe:str=""):
+        fpr, tpr, thresholds = roc_curve(y_reel, y_pred_proba)
         roc_auc = auc(fpr, tpr)
         
         # cherche seuil optimal
@@ -1303,10 +1466,15 @@ class ProjetAustralieModelisation:
         return scores_auc        
 
 
+    def AUC_macro(self, nom_modele:str="XGBoost", cible:str="Rain", gs:bool=False, nbj:int=8):
+        all_scores_auc=self.AUC_nb_J(nom_modele, cible, gs=gs, nbj=nbj)
+            
+        self.AUC_trace(all_scores_auc, mode="macro", nbj=nbj)
+
     def AUC_par_climat(self, nom_modele:str="XGBoost", cible:str="Rain", gs:bool=False, nbj:int=8):
         all_scores_auc=[]
         climats=[]
-        for climat in self.data.Climat.unique():
+        for climat in np.sort(self.data.Climat.unique()):
             all_scores_auc.append(self.AUC_nb_J(nom_modele, cible, gs=gs, climat=climat, nbj=nbj))
             climats.append(climat)
             
@@ -1330,15 +1498,17 @@ class ProjetAustralieModelisation:
         self.AUC_trace(all_scores_auc, locations, mode="Location", nbj=nbj)
 
         
-    def AUC_trace(self, scores_auc, types, mode:str="Climat", nbj:int=8):
+    def AUC_trace(self, scores_auc, types=None, mode:str="Climat", nbj:int=8):
         fig = plt.figure(figsize=(12,8))
         
         if mode=="Climat":
             for score_auc, item_type in zip(scores_auc, types):
                 plt.plot(range(1,nbj), score_auc, label=f"Climat {item_type} ({self.lib_climats[item_type]})", color=self.palette[item_type])
-        else:
+        elif mode=="Location":
             for score_auc, item_type in zip(scores_auc, types):
                 plt.plot(range(1,nbj), score_auc, label=f"{item_type}")
+        else:
+            plt.plot(range(1,nbj), scores_auc, label="Global")
             
         plt.ylabel("AUC")
         plt.xlabel("Numéro de la journée à J+n prédite pour RainToday")
@@ -1613,7 +1783,7 @@ class ProjetAustralieModelisation:
 #source = pd.read_csv("data_process4_knnim_resample_J365.csv", index_col=0)
 #source = pd.read_csv("data_process3_knnim_resample_J2.csv", index_col=0)
 
-source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
+#source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
 #source = pd.read_csv("data_basique_location.csv", index_col=0)
 
 #pm = ProjetAustralieModelisation(pd.read_csv("data_basique.csv", index_col=0))
