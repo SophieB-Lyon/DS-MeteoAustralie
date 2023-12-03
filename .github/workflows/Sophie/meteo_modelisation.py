@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Created on Sun Oct  1 19:56:30 2023
 
@@ -46,6 +45,7 @@ from tensorflow.keras.layers import Input, Dense, LSTM, Dropout
 from tensorflow.keras.models import Model, Sequential
 from keras.optimizers import Adam
 from keras.preprocessing.sequence import TimeseriesGenerator
+import tensorflow as tf
 
 # timeseries
 from statsmodels.tsa.seasonal import seasonal_decompose
@@ -90,8 +90,9 @@ class ProjetAustralieModelisation:
         if hasattr(self.data, "SaisonCos"):
             self.data = self.data.rename(columns={'SaisonCos':'SaisonCos4pi'})
             self.data["SaisonCos2pi"] = np.cos(2*np.pi*(self.data.index.day_of_year-1)/365)
+            
+        #self.data = self.data.drop(columns=["SaisonCos2pi", "SaisonCos4pi"])
 
-        
         # s'il n'y a que mount ginini en climat 5, on degage
         if (self.data[self.data.Climat==5].Location.nunique()==1):
             self.data = self.data[self.data.Climat!=5]
@@ -164,6 +165,11 @@ class ProjetAustralieModelisation:
         # on reinjecte la cible, on fait un dropna et on eclate entre X et y        
         self.Xy[cible] = self.y
         self.Xy = self.Xy.dropna()       
+
+        if hasattr(self.Xy, "RainTomorrow"):
+            self.Xy.RainTomorrow = self.Xy.RainTomorrow.astype(int)
+        if hasattr(self.Xy, "RainToday"):
+            self.Xy.RainToday = self.Xy.RainToday.astype(int)       
         
         self.y = self.Xy[cible]
         self.X = self.Xy.drop(columns=cible)      
@@ -229,7 +235,7 @@ class ProjetAustralieModelisation:
 #        self.rnn_sequence_longueur = 15
 #        self.rnn_batch_size = 1
 
-        self.rnn_sequence_longueur = 15
+        self.rnn_sequence_longueur = 30
         self.rnn_batch_size = 1
         
         # la cible n'a en realite pas d'importance ici
@@ -347,7 +353,7 @@ class ProjetAustralieModelisation:
         #modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
 
         #history = modele.fit(self.X_train, self.y_train, epochs=10, batch_size=128, validation_split=.2, verbose=1)
-        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=3, verbose=1, validation_data=self.rnn_validation_generator)
+        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=80, verbose=1, validation_data=self.rnn_validation_generator)
 
         self.modele=modele
         self.history=history
@@ -453,8 +459,8 @@ class ProjetAustralieModelisation:
         self.validation_orig_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(validation_orig_unscaled), columns=self.Xy.columns)[cible]
         self.validation_orig_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_2].index
 
-#☺        plt.figure(figsize=(150, 6))
-        plt.figure(figsize=(30, 6))
+        plt.figure(figsize=(50, 6))
+#        plt.figure(figsize=(30, 6))
         plt.plot(self.train_orig_unscaled, label="Train Orig", alpha=.75)
         plt.plot(self.train_pred_unscaled, label="Train Pred", alpha=.75)
         plt.plot(self.validation_orig_unscaled, label="Val Orig", alpha=.75)
@@ -465,6 +471,10 @@ class ProjetAustralieModelisation:
 
         print ("RMSE Train: ",np.sqrt(mean_squared_error(self.train_orig_unscaled, self.train_pred_unscaled)))
         print ("RMSE Valid: ",np.sqrt(mean_squared_error(self.validation_orig_unscaled, self.validation_pred_unscaled)))
+        
+        print ("MAE Train: ",mean_absolute_error(self.train_orig_unscaled, self.train_pred_unscaled))
+        print ("MAE Valid: ",mean_absolute_error(self.validation_orig_unscaled, self.validation_pred_unscaled))
+        
 #        test_pred = np.repeat(test_pred, self.Xy.shape[1], axis=-1)       
 #        test_pred = modele.predict(self.rnn_test_generator)
         
@@ -503,8 +513,8 @@ class ProjetAustralieModelisation:
         pred =[]
         reel = []
         
-        X = self.rnn_validation_generator[0][0]
-        y = self.rnn_validation_generator[0][1][0]
+        X = self.rnn_test_generator[0][0]
+        y = self.rnn_test_generator[0][1][0]
         y_pred = self.modele.predict(X)[0][0]
         pred.append(y_pred)
         reel.append(y)
@@ -516,7 +526,7 @@ class ProjetAustralieModelisation:
             X = X.reshape(1,-1)
             y_pred = self.modele.predict(X)[0][0]
             pred.append(y_pred)
-            y_reel = self.rnn_validation_generator[i+1][1][0]
+            y_reel = self.rnn_test_generator[i+1][1][0]
             reel.append(y_reel)
             print (i, y_pred, y_reel, X)
             
@@ -525,20 +535,21 @@ class ProjetAustralieModelisation:
         
         pred_xtend = np.repeat(np.array(pred).reshape(len(pred),1), self.Xy.shape[1], axis=-1)
         pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(pred_xtend), columns=self.Xy.columns)[cible]
-        pred_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_1+self.rnn_sequence_longueur+nb_prev+1].index
+        pred_unscaled.index = self.Xy[self.indice_coupure_2+self.rnn_sequence_longueur:self.indice_coupure_2+self.rnn_sequence_longueur+nb_prev+1].index
         
         reel_xtend = np.repeat(np.array(reel).reshape(len(reel),1), self.Xy.shape[1], axis=-1)
         reel_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(reel_xtend), columns=self.Xy.columns)[cible]
-        reel_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_1+self.rnn_sequence_longueur+nb_prev+1].index
+        reel_unscaled.index = self.Xy[self.indice_coupure_2+self.rnn_sequence_longueur:self.indice_coupure_2+self.rnn_sequence_longueur+nb_prev+1].index
         
         plt.figure(figsize=(16, 6))
         plt.plot(pred_unscaled, label="Predictions incrémentales")
         plt.plot(reel_unscaled, label="Donnees reelles")
         plt.legend()
-        plt.title("Prediction des températures pour 2016")
+        plt.title("Prediction des températures sur période non vue à l'entraînement")
         plt.show();
         
-        print ("RMSE Valid: ",np.sqrt(mean_squared_error(reel_unscaled, pred_unscaled)))
+        print ("RMSE test: ",np.sqrt(mean_squared_error(reel_unscaled, pred_unscaled)))
+        print ("MAE test: ",mean_absolute_error(reel_unscaled, pred_unscaled))               
     
     # --------
     #  entraine des modeles sur 365 jours de prediction de Rain_J
@@ -664,7 +675,7 @@ class ProjetAustralieModelisation:
         
         lib = "Feature Importance"
         if libelle!="":
-           lib +=" pour "+libelle
+           lib +=" pour "+libelle+" ("+self.cible+")"
         plt.xlabel(lib)
         plt.show();
         
@@ -1052,6 +1063,8 @@ class ProjetAustralieModelisation:
         # seules les variables débutant par Rain impliquent de la classification, sauf Rainfall
         est_classification = cible.startswith("Rain") and not cible.startswith("Rainfall")
                 
+        self.cible = cible
+        
         print (time.ctime())
         
         param_modele=None
@@ -1278,6 +1291,11 @@ class ProjetAustralieModelisation:
         inputs = Input(shape=(self.X_train.shape[1]), name="Inputlay")
         dense1 = Dense(units=50, activation='tanh', name='d1')
         dense2 = Dense(units=30, activation='tanh', name='d2')
+
+#        dense1 = Dense(units=64, activation='relu', name='d1')
+#        dense2 = Dense(units=64, activation='relu', name='d2')
+
+
         #dense3 = Dense(units=10, activation='tanh', name='d3')
         dense4 = Dense(units=1, activation='sigmoid', name='d4')
         
@@ -1290,14 +1308,20 @@ class ProjetAustralieModelisation:
         modele.summary()
         
         opt = Adam(lr=1e-4)
+#        opt = Adam(lr=1e-2)
+        
         modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
 
         # gere le desequilibre        
         from sklearn.utils import compute_class_weight
         classWeight = compute_class_weight('balanced', classes=[0,1], y=self.y_train) 
         classWeight = dict(enumerate(classWeight))
+        classWeight = None
         
-        history = modele.fit(self.X_train, self.y_train, epochs=1000, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=0)
+        #history = modele.fit(self.X_train, self.y_train, epochs=1000, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=2, callbacks=[tf.keras.callbacks.EarlyStopping(patience=50)])
+        history = modele.fit(self.X_train, self.y_train, epochs=1000, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=2)#, callbacks=[tf.keras.callbacks.EarlyStopping(patience=50)])
+        
+#        history = modele.fit(self.X_train, self.y_train, epochs=50, batch_size=50, validation_split=.2, verbose=1, callbacks=[tf.keras.callbacks.EarlyStopping(patience=10)])
         
         self.modele=modele
         self.history=history
@@ -1317,7 +1341,21 @@ class ProjetAustralieModelisation:
         plt.figure(figsize=(16, 6))
         plt.plot(self.history.history['val_binary_accuracy'], "g", label="Accuracy (Val)")
         plt.plot(self.history.history['binary_accuracy'], "b", label="Accuracy (Train)")
-        plt.ylim((.7,.85))
+        plt.ylim((.77,.85))
+        plt.axhline(y=0.78, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.79, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.8, color='black', linestyle='dashed')        
+        plt.axhline(y=0.81, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.82, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.83, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.84, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.85, color='black', linestyle='dashed')        
+        plt.axhline(y=0.86, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.87, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.88, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.89, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.9, color='black', linestyle='dashed')        
+
         plt.legend()
         plt.xlabel("Epochs")
         plt.ylabel("Accuracy")
@@ -1783,7 +1821,7 @@ class ProjetAustralieModelisation:
 #source = pd.read_csv("data_process4_knnim_resample_J365.csv", index_col=0)
 #source = pd.read_csv("data_process3_knnim_resample_J2.csv", index_col=0)
 
-#source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
+source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
 #source = pd.read_csv("data_basique_location.csv", index_col=0)
 
 #pm = ProjetAustralieModelisation(pd.read_csv("data_basique.csv", index_col=0))
