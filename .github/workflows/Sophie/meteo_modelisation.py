@@ -20,6 +20,7 @@ from sklearn.model_selection import train_test_split
 
 # optimisation
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from tensorflow.keras.callbacks import LearningRateScheduler
 
 from imblearn.over_sampling import RandomOverSampler, SMOTE
 # auc
@@ -38,6 +39,7 @@ from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.neural_network import MLPClassifier
 from sklearn.dummy import DummyClassifier
+from sklearn.linear_model import LogisticRegression
 import xgboost as xgb
 
 # NN
@@ -189,7 +191,11 @@ class ProjetAustralieModelisation:
             self.y=self.y[self.y.index<'2016-01-01']
             self.Xy = self.Xy[self.Xy.index<'2016-01-01']
 
-        X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=66, stratify=self.y) 
+        est_classification = cible.startswith("Rain") and not cible.startswith("Rainfall")
+        if est_classification:
+            X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=66, stratify=self.y) 
+        else:
+            X_train, X_test, y_train, y_test = train_test_split(self.X, self.y, test_size=0.2, random_state=66) 
 
         # on supprime la Location si elle est presente en str (utile uniquement pour filtrer en amont)
         #if hasattr(self.Xy, "Location"):
@@ -235,11 +241,11 @@ class ProjetAustralieModelisation:
 #        self.rnn_sequence_longueur = 15
 #        self.rnn_batch_size = 1
 
-        self.rnn_sequence_longueur = 30
+        self.rnn_sequence_longueur = 3
         self.rnn_batch_size = 1
         
         # la cible n'a en realite pas d'importance ici
-        self._modelisation_preparation(cible="RainTomorrow", scale=False, location=location)
+        self._modelisation_preparation(cible=cible, scale=False, location=location)
         
         self.XyOrig = self.Xy[cible]
         
@@ -813,13 +819,13 @@ class ProjetAustralieModelisation:
         figure = plt.figure(figsize=(8,4))
         xtick = [*range(1,16), *range(16,nbj,7)]
 
-        masque = (self.resultats_rainj_macro.seuil<.1) & (self.resultats_rainj_macro.J<=nbj)
+        masque = (self.resultats_rainj_macro.seuil>.1) & (self.resultats_rainj_macro.J<=nbj)
 
         plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].AccuracyTrain.values, label="Accuracy (train)")
         plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].AccuracyTest.values, label="Accuracy (test)")
         plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].RecallTest.values, label="Recall (test)")
         plt.plot(self.resultats_rainj_macro[masque].J.values, self.resultats_rainj_macro[masque].AUC.values, label="AUC")
-        plt.title("Variables de Performances pour toute l'Australie\n(seuil par défaut)")
+        plt.title("Variables de Performances pour toute l'Australie\n(seuil optimal)")
         plt.axhline(.9, color = '#666', linestyle = '--')
         plt.axhline(.8, color = '#666', linestyle = '--')
         plt.axhline(.7, color = '#666', linestyle = '--')
@@ -827,6 +833,9 @@ class ProjetAustralieModelisation:
         #ax[num_ax].axhline(.55, color = '#666', linestyle = '--')
         plt.axhline(.5, color = '#666', linestyle = '--')
         plt.xticks(xtick)
+        plt.xlabel("Nb de journées de prédiction de la pluie dans le futur")
+        plt.ylabel("Score")
+      
         plt.legend(loc="upper right")
         
         plt.ylim(0,1)
@@ -1166,6 +1175,10 @@ class ProjetAustralieModelisation:
             existe_proba=True
             modele=DummyClassifier(random_state=0, strategy='stratified')
             
+        elif nom_modele=='LogisticRegression':
+            existe_proba=True
+            modele=LogisticRegression(random_state=0)
+            
         else:
             print("\n -------\nNom de modèle inconnu\n -------\n")
             return
@@ -1290,25 +1303,27 @@ class ProjetAustralieModelisation:
 
         inputs = Input(shape=(self.X_train.shape[1]), name="Inputlay")
         dense1 = Dense(units=50, activation='tanh', name='d1')
-        dense2 = Dense(units=30, activation='tanh', name='d2')
+        dense2 = Dense(units=50, activation='relu', name='d2')
 
 #        dense1 = Dense(units=64, activation='relu', name='d1')
 #        dense2 = Dense(units=64, activation='relu', name='d2')
+        #dense3 = Dropout(.2)
 
-
-        #dense3 = Dense(units=10, activation='tanh', name='d3')
+#        dense3 = Dense(units=5, activation='tanh', name='d3')
         dense4 = Dense(units=1, activation='sigmoid', name='d4')
         
         x = dense1(inputs)
         x = dense2(x)
-        #x = dense3(x)
+#        x = dense3(x)
+
+#        x= inputs
         outputs = dense4(x)
         
         modele = Model(inputs = inputs, outputs = outputs)
         modele.summary()
         
-        opt = Adam(lr=1e-4)
-#        opt = Adam(lr=1e-2)
+        opt = Adam(lr=1e-5)
+#        opt = Adam(lr=1e-1)
         
         modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
 
@@ -1316,10 +1331,18 @@ class ProjetAustralieModelisation:
         from sklearn.utils import compute_class_weight
         classWeight = compute_class_weight('balanced', classes=[0,1], y=self.y_train) 
         classWeight = dict(enumerate(classWeight))
+        self.classWeight = classWeight
+        
         classWeight = None
+        #classWeight = {0:100, 1:1}
+        
+        lrate = LearningRateScheduler(self.learning_rate_schedule)
+        #cb_liste=[lrate, tf.keras.callbacks.EarlyStopping(patience=50)]
+        cb_liste=[lrate]
+        #cb_liste = None
         
         #history = modele.fit(self.X_train, self.y_train, epochs=1000, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=2, callbacks=[tf.keras.callbacks.EarlyStopping(patience=50)])
-        history = modele.fit(self.X_train, self.y_train, epochs=1000, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=2)#, callbacks=[tf.keras.callbacks.EarlyStopping(patience=50)])
+        history = modele.fit(self.X_train, self.y_train, epochs=300, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=2, callbacks=cb_liste)
         
 #        history = modele.fit(self.X_train, self.y_train, epochs=50, batch_size=50, validation_split=.2, verbose=1, callbacks=[tf.keras.callbacks.EarlyStopping(patience=10)])
         
@@ -1332,6 +1355,21 @@ class ProjetAustralieModelisation:
         print (time.ctime())
         self.resultats_dnn(climat, location, cible)
         
+    # learning rate schedule
+    def learning_rate_schedule(self, epoch, lr):
+        lrate = .1
+        if epoch<30:
+            lrate=1e-3
+        elif epoch<200:
+            lrate=1e-4
+        elif epoch<250:
+            lrate=1e-5
+        else:
+            lrate=1e-6
+        
+        #print ("LR: ",lrate)
+        return lrate
+    
         
     # affiche les resultats du DNN entrainé
     def resultats_dnn(self, climat:int=None, location:str="", cible:str="RainTomorrow"):
@@ -1341,7 +1379,7 @@ class ProjetAustralieModelisation:
         plt.figure(figsize=(16, 6))
         plt.plot(self.history.history['val_binary_accuracy'], "g", label="Accuracy (Val)")
         plt.plot(self.history.history['binary_accuracy'], "b", label="Accuracy (Train)")
-        plt.ylim((.77,.85))
+        plt.ylim((.85,.88))
         plt.axhline(y=0.78, color='gray', linestyle='dashed')        
         plt.axhline(y=0.79, color='gray', linestyle='dashed')        
         plt.axhline(y=0.8, color='black', linestyle='dashed')        
@@ -1350,8 +1388,11 @@ class ProjetAustralieModelisation:
         plt.axhline(y=0.83, color='gray', linestyle='dashed')        
         plt.axhline(y=0.84, color='gray', linestyle='dashed')        
         plt.axhline(y=0.85, color='black', linestyle='dashed')        
+        plt.axhline(y=0.855, color='#CCC', linestyle='dashed')        
         plt.axhline(y=0.86, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.865, color='#CCC', linestyle='dashed')        
         plt.axhline(y=0.87, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.875, color='#CCC', linestyle='dashed')        
         plt.axhline(y=0.88, color='gray', linestyle='dashed')        
         plt.axhline(y=0.89, color='gray', linestyle='dashed')        
         plt.axhline(y=0.9, color='black', linestyle='dashed')        
@@ -1359,7 +1400,7 @@ class ProjetAustralieModelisation:
         plt.legend()
         plt.xlabel("Epochs")
         plt.ylabel("Accuracy")
-        plt.title(f"Historique d'Accuracy - \n{nom_modele}")
+        plt.title(f"Historique d'Accuracy \n{nom_modele}")
         plt.show();
         
         self.test_pred = self.modele.predict(self.X_test)
@@ -1376,6 +1417,17 @@ class ProjetAustralieModelisation:
         self.scores_classification(self.y_test, self.test_pred.reshape(-1)>=.5)
         print ("\nSeuil optimal:")
         self.scores_classification(self.y_test, self.test_pred.reshape(-1)>=self.res_roc_best_seuil)
+        
+        # loss
+        plt.figure(figsize=(16, 6))
+        plt.plot(self.history.history['val_loss'], "g", label="Loss (Val)")
+        plt.plot(self.history.history['loss'], "b", label="Loss (Train)")
+        plt.legend()
+        plt.xlabel("Epochs")
+        plt.ylabel("Loss")
+        plt.title(f"Evolution de la fonction de perte \n{nom_modele}")
+        plt.show();
+        
         
         print (time.ctime())
 
@@ -1827,6 +1879,7 @@ source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
 #pm = ProjetAustralieModelisation(pd.read_csv("data_basique.csv", index_col=0))
 pm = ProjetAustralieModelisation(source)
 
+pm.modelisation_dnn()
 
 #pm.animation_variable()
 
