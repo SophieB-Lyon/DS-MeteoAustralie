@@ -241,7 +241,7 @@ class ProjetAustralieModelisation:
 #        self.rnn_sequence_longueur = 15
 #        self.rnn_batch_size = 1
 
-        self.rnn_sequence_longueur = 3
+        self.rnn_sequence_longueur = 10
         self.rnn_batch_size = 1
         
         # la cible n'a en realite pas d'importance ici
@@ -265,13 +265,17 @@ class ProjetAustralieModelisation:
         proportion_2=.9
         self.indice_coupure_1 = int(len(self.Xy) * proportion_1)
         self.indice_coupure_2 = int(len(self.Xy) * proportion_2)
-#        self.X_train = self.Xy[:indice_coupure_1]
-#        self.X_validation = self.Xy[indice_coupure_1:indice_coupure_2]
-#        self.X_test = self.Xy[indice_coupure_2:]       
 
-        self.X_train = self.Xy[cible][:self.indice_coupure_1]
-        self.X_validation = self.Xy[cible][self.indice_coupure_1:self.indice_coupure_2]
-        self.X_test = self.Xy[cible][self.indice_coupure_2:]
+        if self.rnn_multivariee:
+            # multivarie
+            self.X_train = self.Xy[:self.indice_coupure_1].to_numpy()
+            self.X_validation = self.Xy[self.indice_coupure_1:self.indice_coupure_2].to_numpy()
+            self.X_test = self.Xy[self.indice_coupure_2:].to_numpy()
+        else:   
+            # monovarie
+            self.X_train = self.Xy[cible][:self.indice_coupure_1].to_numpy()
+            self.X_validation = self.Xy[cible][self.indice_coupure_1:self.indice_coupure_2].to_numpy()
+            self.X_test = self.Xy[cible][self.indice_coupure_2:].to_numpy()
 
         self.y_train = self.X_train
         self.y_validation = self.X_validation
@@ -333,8 +337,11 @@ class ProjetAustralieModelisation:
         self.rnn_cibles = rnn_cibles           
         
     # cree un RNN de regression
-    def modelisation_rnn_reg(self, location:str, cible:str):
+    def modelisation_rnn_reg(self, location:str, cible:str, multivariee:bool=False):
         print (time.ctime())      
+        
+        # analyse mono ou multivariée
+        self.rnn_multivariee = multivariee
 
         print (f'\n -------\nModelisation de {cible} avec un RNN\n -------\n')
         i_temps_debut=time.time()
@@ -344,14 +351,26 @@ class ProjetAustralieModelisation:
         modele = Sequential()
 
         num_features = 1
-        #num_features = self.Xy.shape[1]
+        if len(self.rnn_train_generator.data.shape)==1:
+            num_features=1
+        else:
+            num_features = self.rnn_train_generator.data.shape[1]
 
-#        modele.add(LSTM(50, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, self.Xy.shape[1])))
-        modele.add(LSTM(30, activation='relu', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
-        #modele.add(Dropout(.1))
-        modele.add(LSTM(10, activation='relu'))
+# v0
+#        modele.add(LSTM(30, activation='relu', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+#        modele.add(LSTM(10, activation='relu'))
+
+# v1
+        modele.add(LSTM(100, activation='relu', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+        modele.add(Dropout(.1))
+        modele.add(LSTM(50, activation='relu'))
+        modele.add(Dropout(.1))       
+        modele.add(Dense(100))
+        
+        # nb de neurones en sortie = nb de feature à prédire pour alimenter à nouveau le modele pour les predictions des jours futurs
 #        modele.add(Dense(self.Xy.shape[1]))
-        modele.add(Dense(1))
+        modele.add(Dense(num_features))
+        
         opt = Adam(lr=1e-4)
         modele.compile(optimizer=opt, loss='mse')
         
@@ -359,18 +378,22 @@ class ProjetAustralieModelisation:
         #modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
 
         #history = modele.fit(self.X_train, self.y_train, epochs=10, batch_size=128, validation_split=.2, verbose=1)
-        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=80, verbose=1, validation_data=self.rnn_validation_generator)
+#        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=80, verbose=1, validation_data=self.rnn_validation_generator)
+        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=15, verbose=1, validation_data=self.rnn_validation_generator)
 
         self.modele=modele
         self.history=history
 
         print (time.ctime())
         
-        self.resultats_rnn(location, cible)
+        self.resultats_rnn(location, cible, multivariee)
 
     # cree un RNN de classification
-    def modelisation_rnn_clf(self, location:str, cible:str):
+    def modelisation_rnn_clf(self, location:str, cible:str, multivariee:bool=False):
         print (time.ctime())      
+
+        # analyse mono ou multivariée
+        self.rnn_multivariee = multivariee
 
         print (f'\n -------\nModelisation de {cible} avec un RNN\n -------\n')
         i_temps_debut=time.time()
@@ -380,14 +403,21 @@ class ProjetAustralieModelisation:
         modele = Sequential()
 
         num_features = 1
-        #num_features = self.Xy.shape[1]
+        if len(self.rnn_train_generator.data.shape)==1:
+            num_features=1
+        else:
+            num_features = self.rnn_train_generator.data.shape[1]
+
 
 #        modele.add(LSTM(50, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, self.Xy.shape[1])))
-        modele.add(LSTM(30, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+#        modele.add(LSTM(30, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+        modele.add(LSTM(100, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
         #modele.add(Dropout(.1))
-        modele.add(LSTM(10, activation='tanh'))
+#        modele.add(LSTM(10, activation='tanh'))
+        modele.add(LSTM(50, activation='tanh'))        
 #        modele.add(Dense(self.Xy.shape[1]))
-        modele.add(Dense(1, activation='sigmoid'))
+        modele.add(Dense(100))
+        modele.add(Dense(num_features, activation='sigmoid'))
         opt = Adam(lr=1e-4)
         #modele.compile(optimizer=opt, loss='mse')
         modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
@@ -395,17 +425,17 @@ class ProjetAustralieModelisation:
         print (modele.summary())
 
         #history = modele.fit(self.X_train, self.y_train, epochs=10, batch_size=128, validation_split=.2, verbose=1)
-        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=100, verbose=1, validation_data=self.rnn_validation_generator)
+        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=15, verbose=1, validation_data=self.rnn_validation_generator)
 
         self.modele=modele
         self.history=history
 
         print (time.ctime())
         
-        self.resultats_rnn_clf(location, cible)
+        self.resultats_rnn_clf(location, cible, multivariee)
         
     # affiche les resultats du RNN CLF entrainé
-    def resultats_rnn_clf(self, location:str="", cible:str="RainTomorrow"):
+    def resultats_rnn_clf(self, location:str="", cible:str="RainTomorrow", multivariee:bool=False):
         
         nom_modele = self.titre_graphe("RNN", "", location=location, cible=cible)
         
@@ -425,16 +455,31 @@ class ProjetAustralieModelisation:
         train_pred = minmax.fit_transform(train_pred)
 
         y_reel = self.y_train[self.rnn_sequence_longueur:]
-        y_pred_proba = train_pred.reshape(-1)
+
+        if not multivariee:
+            y_pred_proba = train_pred.reshape(-1)
+        else:
+            y_pred_proba = train_pred
         y_pred = y_pred_proba>.5
 
+        self.aa0=y_reel
+        self.bb0=y_pred
+
+        if multivariee:
+            y_pred = pd.DataFrame(y_pred, columns=self.Xy.columns)[cible]
+            y_pred_proba = pd.DataFrame(y_pred_proba, columns=self.Xy.columns)[cible]
+            y_reel = pd.DataFrame(y_reel, columns=self.Xy.columns)[cible]
+            
+        
+        self.aa=y_reel
+        self.bb=y_pred
         
         print(classification_report(y_reel, y_pred))
         print (confusion_matrix(y_reel, y_pred))
 
         #print(self.modele.evaluate(self.X_test, self.y_test))
         
-        self.trace_courbe_roc_ann(y_reel, y_pred, nom_modele)
+        self.trace_courbe_roc_ann(y_reel, y_pred_proba, nom_modele)
         
         print ("Seuil par défaut:")
         self.scores_classification(y_reel, y_pred)
@@ -444,24 +489,36 @@ class ProjetAustralieModelisation:
         print (time.ctime())
         
     # affiche les resultats du RNN entrainé
-    def resultats_rnn(self, location:str, cible:str):
+    def resultats_rnn(self, location:str, cible:str, multivariee:bool=False):
         train_pred = self.modele.predict(self.rnn_train_generator)
-        train_pred = np.repeat(train_pred, self.Xy.shape[1], axis=-1)
+        
+        if not self.rnn_multivariee:
+            train_pred = np.repeat(train_pred, self.Xy.shape[1], axis=-1)    
         self.train_pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(train_pred), columns=self.Xy.columns)[cible]
         self.train_pred_unscaled.index = self.Xy[self.rnn_sequence_longueur:self.indice_coupure_1].index
 
         validation_pred = self.modele.predict(self.rnn_validation_generator)
-        validation_pred = np.repeat(validation_pred, self.Xy.shape[1], axis=-1)
+        if not self.rnn_multivariee:
+            validation_pred = np.repeat(validation_pred, self.Xy.shape[1], axis=-1)
         self.validation_pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(validation_pred), columns=self.Xy.columns)[cible]
         self.validation_pred_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_2].index
 
         train_orig_unscaled = pd.DataFrame(columns=self.Xy.columns).astype(self.Xy.dtypes.to_dict())
-        train_orig_unscaled[cible] = self.X_train.iloc[self.rnn_sequence_longueur:]
+        if not multivariee:
+            #train_orig_unscaled[cible] = self.X_train.iloc[self.rnn_sequence_longueur:]
+            train_orig_unscaled[cible] = self.X_train[self.rnn_sequence_longueur:]
+        else:
+            train_orig_unscaled[cible] = pd.DataFrame(self.X_train[self.rnn_sequence_longueur:], columns=self.Xy.columns)[cible]
+            
         self.train_orig_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(train_orig_unscaled), columns=self.Xy.columns)[cible]
         self.train_orig_unscaled.index = self.Xy[self.rnn_sequence_longueur:self.indice_coupure_1].index
 
         validation_orig_unscaled = pd.DataFrame(columns=self.Xy.columns).astype(self.Xy.dtypes.to_dict())
-        validation_orig_unscaled[cible] = self.X_validation.iloc[self.rnn_sequence_longueur:]
+        if not multivariee:
+            #validation_orig_unscaled[cible] = self.X_validation.iloc[self.rnn_sequence_longueur:]
+            validation_orig_unscaled[cible] = self.X_validation[self.rnn_sequence_longueur:]
+        else:
+            validation_orig_unscaled[cible] = pd.DataFrame(self.X_validation[self.rnn_sequence_longueur:], columns=self.Xy.columns)[cible]
         self.validation_orig_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(validation_orig_unscaled), columns=self.Xy.columns)[cible]
         self.validation_orig_unscaled.index = self.Xy[self.indice_coupure_1+self.rnn_sequence_longueur:self.indice_coupure_2].index
 
@@ -539,11 +596,15 @@ class ProjetAustralieModelisation:
         self.rnn_pred2016_pred = pred
         self.rnn_pred2016_orig = reel
         
-        pred_xtend = np.repeat(np.array(pred).reshape(len(pred),1), self.Xy.shape[1], axis=-1)
+        pred_xtend = pred
+        if not self.rnn_multivariee:       
+            pred_xtend = np.repeat(np.array(pred).reshape(len(pred),1), self.Xy.shape[1], axis=-1)
         pred_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(pred_xtend), columns=self.Xy.columns)[cible]
         pred_unscaled.index = self.Xy[self.indice_coupure_2+self.rnn_sequence_longueur:self.indice_coupure_2+self.rnn_sequence_longueur+nb_prev+1].index
         
-        reel_xtend = np.repeat(np.array(reel).reshape(len(reel),1), self.Xy.shape[1], axis=-1)
+        reel_xtend = reel
+        if not self.rnn_multivariee:       
+            reel_xtend = np.repeat(np.array(reel).reshape(len(reel),1), self.Xy.shape[1], axis=-1)
         reel_unscaled = pd.DataFrame(self.scaler_rnn.inverse_transform(reel_xtend), columns=self.Xy.columns)[cible]
         reel_unscaled.index = self.Xy[self.indice_coupure_2+self.rnn_sequence_longueur:self.indice_coupure_2+self.rnn_sequence_longueur+nb_prev+1].index
         
@@ -1309,12 +1370,12 @@ class ProjetAustralieModelisation:
 #        dense2 = Dense(units=64, activation='relu', name='d2')
         #dense3 = Dropout(.2)
 
-#        dense3 = Dense(units=5, activation='tanh', name='d3')
+#        dense3 = Dense(units=50, activation='relu', name='d3')
         dense4 = Dense(units=1, activation='sigmoid', name='d4')
         
         x = dense1(inputs)
         x = dense2(x)
-#        x = dense3(x)
+        #x = dense3(x)
 
 #        x= inputs
         outputs = dense4(x)
@@ -1322,7 +1383,7 @@ class ProjetAustralieModelisation:
         modele = Model(inputs = inputs, outputs = outputs)
         modele.summary()
         
-        opt = Adam(lr=1e-5)
+        opt = Adam(lr=1e-4)
 #        opt = Adam(lr=1e-1)
         
         modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
@@ -1342,7 +1403,7 @@ class ProjetAustralieModelisation:
         #cb_liste = None
         
         #history = modele.fit(self.X_train, self.y_train, epochs=1000, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=2, callbacks=[tf.keras.callbacks.EarlyStopping(patience=50)])
-        history = modele.fit(self.X_train, self.y_train, epochs=300, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=2, callbacks=cb_liste)
+        history = modele.fit(self.X_train, self.y_train, epochs=1000, batch_size=128, validation_split=.2, class_weight=classWeight, verbose=2, callbacks=cb_liste)
         
 #        history = modele.fit(self.X_train, self.y_train, epochs=50, batch_size=50, validation_split=.2, verbose=1, callbacks=[tf.keras.callbacks.EarlyStopping(patience=10)])
         
@@ -1362,10 +1423,13 @@ class ProjetAustralieModelisation:
             lrate=1e-3
         elif epoch<200:
             lrate=1e-4
-        elif epoch<250:
-            lrate=1e-5
+#        elif epoch<250:
+#            lrate=1e-5
+#        else:
+#            lrate=1e-6
         else:
-            lrate=1e-6
+            lrate=1e-5
+    
         
         #print ("LR: ",lrate)
         return lrate
@@ -1386,7 +1450,9 @@ class ProjetAustralieModelisation:
         plt.axhline(y=0.81, color='gray', linestyle='dashed')        
         plt.axhline(y=0.82, color='gray', linestyle='dashed')        
         plt.axhline(y=0.83, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.835, color='#CCC', linestyle='dashed')        
         plt.axhline(y=0.84, color='gray', linestyle='dashed')        
+        plt.axhline(y=0.845, color='#CCC', linestyle='dashed')        
         plt.axhline(y=0.85, color='black', linestyle='dashed')        
         plt.axhline(y=0.855, color='#CCC', linestyle='dashed')        
         plt.axhline(y=0.86, color='gray', linestyle='dashed')        
@@ -1879,7 +1945,7 @@ source = pd.read_csv("data_process5_knnim_resample_J2.csv", index_col=0)
 #pm = ProjetAustralieModelisation(pd.read_csv("data_basique.csv", index_col=0))
 pm = ProjetAustralieModelisation(source)
 
-pm.modelisation_dnn()
+#pm.modelisation_dnn()
 
 #pm.animation_variable()
 
