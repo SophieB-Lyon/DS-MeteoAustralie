@@ -241,7 +241,9 @@ class ProjetAustralieModelisation:
 #        self.rnn_sequence_longueur = 15
 #        self.rnn_batch_size = 1
 
-        self.rnn_sequence_longueur = 10
+        #self.rnn_sequence_longueur = 10
+        self.rnn_sequence_longueur = 15
+        
         self.rnn_batch_size = 1
         
         # la cible n'a en realite pas d'importance ici
@@ -316,8 +318,7 @@ class ProjetAustralieModelisation:
         
     # cree une sequence pour le rnn
     def _cree_sequence_rnn(self):
-        # on va creer de nombreuses fenetres de predictions
-        
+        # on va creer de nombreuses fenetres de predictions       
         
         rnn_features = []
         rnn_cibles = []
@@ -361,11 +362,19 @@ class ProjetAustralieModelisation:
 #        modele.add(LSTM(10, activation='relu'))
 
 # v1
-        modele.add(LSTM(100, activation='relu', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
-        modele.add(Dropout(.1))
-        modele.add(LSTM(50, activation='relu'))
-        modele.add(Dropout(.1))       
-        modele.add(Dense(100))
+        if multivariee:
+            # réseau +  complexe si multivarié
+            modele.add(LSTM(30, activation='relu', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+            modele.add(LSTM(100, activation='relu'))
+            modele.add(Dense(100, activation='relu'))            
+
+        else:
+            modele.add(LSTM(30, activation='relu', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+    #        modele.add(Dropout(.1))
+            modele.add(LSTM(10, activation='relu'))
+            #modele.add(Dense(100, activation='relu'))                        
+    #        modele.add(Dropout(.1))       
+            #modele.add(Dense(100, activation='relu'))
         
         # nb de neurones en sortie = nb de feature à prédire pour alimenter à nouveau le modele pour les predictions des jours futurs
 #        modele.add(Dense(self.Xy.shape[1]))
@@ -379,7 +388,7 @@ class ProjetAustralieModelisation:
 
         #history = modele.fit(self.X_train, self.y_train, epochs=10, batch_size=128, validation_split=.2, verbose=1)
 #        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=80, verbose=1, validation_data=self.rnn_validation_generator)
-        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=15, verbose=1, validation_data=self.rnn_validation_generator)
+        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=30, verbose=1, validation_data=self.rnn_validation_generator)
 
         self.modele=modele
         self.history=history
@@ -411,21 +420,38 @@ class ProjetAustralieModelisation:
 
 #        modele.add(LSTM(50, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, self.Xy.shape[1])))
 #        modele.add(LSTM(30, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
-        modele.add(LSTM(100, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
-        #modele.add(Dropout(.1))
-#        modele.add(LSTM(10, activation='tanh'))
-        modele.add(LSTM(50, activation='tanh'))        
-#        modele.add(Dense(self.Xy.shape[1]))
-        modele.add(Dense(100))
+
+        if multivariee:
+            # on a un reseau + complexe pour le multivarie
+            modele.add(LSTM(50, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+            #modele.add(Dropout(.1))
+    #        modele.add(LSTM(10, activation='tanh'))
+            modele.add(LSTM(50, activation='relu'))        
+    #        modele.add(Dense(self.Xy.shape[1]))
+    #        modele.add(Dense(50))
+            modele.add(Dense(50))
+        
+        else:
+            modele.add(LSTM(5, activation='tanh', return_sequences=True, input_shape=(self.rnn_sequence_longueur, num_features)))
+            modele.add(LSTM(10, activation='relu'))        
+            modele.add(Dense(10))
+            
+        
         modele.add(Dense(num_features, activation='sigmoid'))
-        opt = Adam(lr=1e-4)
+        opt = Adam(lr=1e-3)
         #modele.compile(optimizer=opt, loss='mse')
-        modele.compile(loss='binary_crossentropy', metrics=['binary_accuracy'], optimizer=opt)
+        
+        # en multivarie, il y a des variables continues et des variables binaires => il nous faut deux loss
+        if multivariee:
+            modele.compile(loss=['binary_crossentropy', 'mse'], metrics=['accuracy'], optimizer=opt)
+        # en monovarie, on est juste sur une classification binaire
+        else:
+            modele.compile(loss='binary_crossentropy', metrics=['accuracy'], optimizer=opt)
         
         print (modele.summary())
 
         #history = modele.fit(self.X_train, self.y_train, epochs=10, batch_size=128, validation_split=.2, verbose=1)
-        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=15, verbose=1, validation_data=self.rnn_validation_generator)
+        history = modele.fit_generator(generator=self.rnn_train_generator, epochs=10, verbose=1, validation_data=self.rnn_validation_generator)
 
         self.modele=modele
         self.history=history
@@ -437,12 +463,16 @@ class ProjetAustralieModelisation:
     # affiche les resultats du RNN CLF entrainé
     def resultats_rnn_clf(self, location:str="", cible:str="RainTomorrow", multivariee:bool=False):
         
-        nom_modele = self.titre_graphe("RNN", "", location=location, cible=cible)
+        str_multivarie="monovarié"
+        if multivariee:
+            str_multivarie="multivarié"            
+        nom_modele = self.titre_graphe("RNN "+str_multivarie, "", location=location, cible=cible)
         
         plt.figure(figsize=(16, 6))
-        plt.plot(self.history.history['val_binary_accuracy'], "g", label="Accuracy (Val)")
-        plt.plot(self.history.history['binary_accuracy'], "b", label="Accuracy (Train)")
-        plt.ylim((.2,.85))
+        plt.plot(self.history.history['val_accuracy'], "g", label="Accuracy (Val)")
+        plt.plot(self.history.history['accuracy'], "b", label="Accuracy (Train)")
+        plt.plot(self.history.history['loss'], "r", label="Loss")
+        #plt.ylim((.2,.85))
         plt.legend()
         plt.xlabel("Epochs")
         plt.ylabel("Accuracy")
