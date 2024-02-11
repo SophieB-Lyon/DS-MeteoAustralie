@@ -20,11 +20,11 @@ df_met.drop("Date", inplace=True, axis=1)
 
 # Suppression des colonnes pour simplifier
 cols_supp = [col for col in df_met.columns if "WindGust" in col or "WindDir" in col]
-df_met.drop(columns=cols_supp, inplace=True)
-
-# Sélection de la ville
+df_met.dro# Sélection de la ville
 villes = df_base['Location'].unique()
-ville_sel = st.selectbox('Ville:', villes)
+ville_sel = st.selectbox('Ville:', villes)p(columns=cols_supp, inplace=True)
+
+
 
 # Initialisation des entrées utilisateur
 entrees = {}
