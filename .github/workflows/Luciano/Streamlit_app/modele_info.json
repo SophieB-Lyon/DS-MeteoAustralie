@@ -1,0 +1,1 @@
+{"algorithme": "XGBoost", "hyperparametres": {"n_estimators": 120, "max_depth": 7, "learning_rate": 0.1}, "exactitude": 0.8568860272598043, "rappel": 0.5121396054628224}
